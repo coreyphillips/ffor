@@ -2,7 +2,9 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.1 (2026-07-02)
+- Status: Draft v0.3 (2026-07-02) — hardened by computed test vectors (Appendix A) and
+  a working M1+M2 prototype (beignet `feat/ffor`); wire details below reflect what the
+  prototype actually implements
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: CC0
@@ -220,6 +222,7 @@ echoes.
 |---|---|---|
 | `s_commitment_number` (`n0`) | u64 | explicit, to anchor evidence |
 | TLV 1: `payment_hashes` | K×32 | Variant A only: `S`-generated. **`H_1` MUST equal `SHA256(per_commitment_secret_S[n0])`** (§12.1) |
+| TLV 7: `s_htlc_id_base` | u64 | the HTLC id `S` assigns to voucher `seq 1`; voucher `seq i` gets id `base + i − 1`. Required — `R` cannot otherwise observe `S`'s offer counter, and reconciliation ends with `j` live HTLCs both sides must address by id. |
 | `signature` | 64 | `S`'s node-key sig (proves `S` accepted budget/fee terms and hash set) |
 
 Requirements:
@@ -240,9 +243,11 @@ Requirements:
 Each invoice: **amountless** (payer supplies the amount — `R` cannot pre-sign unknown
 amounts), payment hash `H_i`, expiry ≥ wall-clock estimate of `T_exp`, a route hint
 `S → R`, `min_final_cltv_expiry` as usual (it binds `S`'s upstream acceptance, not the
-voucher), signed by `R`'s node key. These are single-use: `S` MUST NOT settle the same
-hash twice and MUST hand out invoice `i+1` only after `i` is consumed (or serve them in
-any order but consume each once).
+voucher), signed by `R`'s node key. These are single-use and **strictly ordered**: settlement
+`seq i` carries exactly `H_i` (§9.1), and the §7.2 `H_1` binding requires the first
+settled payment to be hash 1 — so `S` MUST serve invoice `i+1` only after `i` is
+consumed, MUST NOT settle the same hash twice, and MUST fail upstream any delegated
+hash arriving out of order.
 
 Distribution: v1 leaves payer-side distribution out of scope — `S` MAY serve the next
 unused invoice via LNURL-pay-style endpoint, BOLT 12 message relay, or any out-of-band
@@ -340,7 +345,9 @@ Constraints `S` MUST enforce before accepting delegated payment `i`:
 
 On failure of any check, `S` MUST NOT settle: it either fails the upstream HTLC
 (`temporary_node_failure`) or falls back to hold-and-wake if separately supported
-(§11.4).
+(§11.4). Failure construction is standard BOLT 4 with `S` as the erring node, using
+`S`'s own hop shared secret — `S` decrypted its own onion layer normally; only the
+*next* onion (addressed to `R`) is opaque to it.
 
 Byte-accurate test vectors for this construction (`C_0…C_3`, three settlements,
 computed and independently verified against a real BOLT 3 implementation) are in the
@@ -389,7 +396,9 @@ HTLC is irrevocably committed and all §8 checks pass:
 
 **Variant A** (`S` knows `P_i`):
 1. `S` durably persists the package, delivers it to `R`'s mailbox if one was provided
-   (SHOULD), then
+   (SHOULD — note no normative mailbox transport is defined in v0.x; reconciliation
+   replay is the only in-protocol delivery path, and the mailbox interface is deferred
+   to Appendix C), then
 2. settles upstream with `update_fulfill_htlc(P_i)`.
 
 **Variant B** (`T` knows `t_i`):
@@ -505,22 +514,36 @@ own nodes, or with small budgets/short epochs.
 
 On reconnect, `channel_reestablish` carries TLV **55001**
 `{epoch_id: 32, last_seq: u16, state: u8}` from each side (`state`: 0 = setup, 1 =
-epoch, 2 = reconciling, 3 = closed). Then, from quiescence (automatic — no other updates
-are legal in FF_EPOCH):
+epoch, 2 = reconciling, 3 = closed), and — from `S`, iff escape signatures were
+exchanged — TLV **55003** `s_catchup_per_commitment_point` (33 bytes): `S`'s
+per-commitment point for `n0 + 2`, which `R` otherwise could not obtain before signing
+the catch-up commitment in step 2. Mismatch rules: an `S` reporting no epoch means
+setup never completed and `R` MUST discard (§7.5); conversely, if `R` reports no epoch
+while `S` has `last_seq > 0`, `S` MUST retain the epoch and respond `ff_error` — `S`
+holds voucher obligations and MUST NOT forget them; `S` MAY discard only at
+`last_seq == 0`. `S`'s `last_seq` is **authoritative** for the replay count, and `S`
+MUST send its `channel_reestablish` before any replayed packages (replay ordering
+relies on transport FIFO). Then, from quiescence (automatic — no other updates are
+legal in FF_EPOCH):
 
 1. **Replay**: `S` re-sends `ff_settlement` for `seq 1…j`. `R` independently fetches
    packages/preimages from `T` (Variant B) or its mailbox and cross-checks; any
    discrepancy between `S`'s replay and `T`'s store is itself signed evidence (§12.2).
+   `R` treats duplicate replays idempotently by byte-comparison; a replayed package
+   that *differs* from a stored one with the same `seq` MUST be rejected (two signed
+   contradictory packages are themselves fraud evidence, §12.2).
    `R` validates every package (same checklist as `T`, §9.4) and adopts `C_j^R`.
 2. **`ff_reconcile`** (type 55015, R→S): `R` signs `S`'s catch-up commitment
-   `C^S_{new}` at number `n0 + 2` (or `n0 + 1` when `G = 0`), mirroring `C_j^R` exactly
-   (same j vouchers, now offered-HTLCs from `S`'s perspective):
+   `C^S_{new}` at number `n0 + 2` (or `n0 + 1` when no escapes were signed), mirroring
+   `C_j^R` exactly (same j vouchers, now offered-HTLCs from `S`'s perspective, HTLC ids
+   per §7.2 `s_htlc_id_base`):
    `{new_commitment_number: u64, commitment_sig: 64, num_htlc_sigs: u16, htlc_sigs:
    j×64, r_next_per_commitment_point: 33}`.
-3. **`ff_reconcile_ack`** (type 55017, S→R):
-   `{TLV 1 revocation_secret_n0: 32 (iff j == 0 — otherwise it went out in package 1),
-   TLV 3 revocation_secret_n0plus1: 32 (iff escapes were signed),
-   s_next_per_commitment_point: 33}`.
+3. **`ff_reconcile_ack`** (type 55017, S→R) — fixed fields first, then the TLV stream
+   (standard LN layout):
+   `{s_next_per_commitment_point: 33}`, then
+   `TLV 1 revocation_secret_n0: 32 (iff j == 0 — otherwise it went out in package 1)`,
+   `TLV 3 revocation_secret_n0plus1: 32 (iff escapes were signed)`.
    `R` MUST verify each secret against its stored points. All escapes are now toxic to
    `S`; `T` can stand down at end of epoch.
 4. **`ff_revoke_batch`** (type 55019, R→S):
@@ -529,8 +552,9 @@ are legal in FF_EPOCH):
    `k < j`). Sequential indexes are not mutually derivable in shachain, hence the
    explicit list; `S` verifies each against `R`'s points and inserts into its shachain
    store normally.
-5. **`ff_end`** (type 55021, both directions): epoch closed; channel returns to
-   OPERATIONAL with `j` live HTLCs, feerate unfrozen.
+5. **`ff_end`** (type 55021): `S` initiates upon successfully processing
+   `ff_revoke_batch`; `R` echoes. Epoch closed; channel returns to OPERATIONAL with
+   `j` live HTLCs, feerate unfrozen.
 6. **Conversion**: `R` sends standard `update_fulfill_htlc` for each voucher (preimages
    from packages / `T`), through the normal commitment dance — the credits become plain
    channel balance with zero new machinery. If `S` stalls here and `T_exp` approaches,
@@ -548,9 +572,18 @@ enforcement rather than aborting.
 - **Reconnect mid-settlement**: `S` MUST complete or upstream-fail any in-flight
   delegated HTLC before entering step 1; reconciliation always starts from a settled
   package history.
-- **Zero-settlement epoch**: steps 1 and 4 are empty; step 2 re-signs the unchanged
-  state at `n0 + 2` purely to kill escapes (skippable entirely when `G = 0`: just
-  `ff_end`).
+- **Zero-settlement epoch**: plain `ff_end` with no reconcile is permitted regardless
+  of `G`. With escapes outstanding this is still safe: normal operation reuses index
+  `n0 + 1`, so the escapes die automatically the next time that index is revoked in
+  the ordinary flow, and until then a broadcast escape only *overpays* `R` (at `j·G`
+  against zero owed) at `S`'s own expense. Implementations MAY instead run the
+  escape-killing reconcile (step 2 at `n0 + 2`, step 3 revealing both secrets)
+  immediately.
+- **Mid-reconcile disconnect**: on the next reconnect `S` simply re-replays from
+  `seq 1`; `R`'s byte-comparison idempotency (§11.1 step 1) makes this safe. Crash
+  windows around `R`'s adoption of `C_j^R` and the `ff_reconcile` send are handled the
+  same way — reconciliation restarts from replay; no step before `ff_revoke_batch`
+  reveals anything `R` cannot safely re-send.
 - **`R` returns after `D` but before `T_exp`**: reconciliation proceeds normally; `S`
   MUST NOT have escaped yet (escape requires `D + escape_delay`).
 - **`R` returns after `S` escaped**: `R` claims the aggregate voucher on-chain with its
@@ -717,9 +750,10 @@ aggregation and payer-side choice are out of scope.
 | 55023 | `ff_error` | both | |
 | — | `ff_release` | T→S | transport-defined |
 
-`channel_reestablish` TLV: 55001 (epoch state). Feature bits 560/561
-(`option_ff_receive`). Liquidity-ads extension TLV for advertised terms: TBD. All
-numbers provisional pending bLIP assignment.
+`channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
+point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Feature bits
+560/561 (`option_ff_receive`). Liquidity-ads extension TLV for advertised terms: TBD.
+All numbers provisional pending bLIP assignment.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
