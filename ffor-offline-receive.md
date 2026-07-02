@@ -258,7 +258,7 @@ message is needed:
 |---|---|---|
 | `num_escapes` (`J`) | u16 | `= ceil(budget_msat / G)` |
 | `escape_sigs` | J×64 | `R`'s signature on escape commitment `E_j` for `j = 1…J` |
-| `escape_htlc_sigs` | J×64 | `R`'s signature for the (single) aggregate voucher output spend path on each `E_j` — not required in v1 (bare-sig voucher, §10), reserved |
+| `escape_htlc_sigs` | J×64 | reserved, MUST be empty in v1 — the aggregate voucher needs no second-level transaction (its CLTV and revocation-delay are applied directly in-script; Appendix B) |
 
 All `E_j` live at `S`'s commitment number `n0 + 1` (whose per-commitment point `R`
 already holds from the last `revoke_and_ack`). They are mutually exclusive alternatives;
@@ -439,12 +439,14 @@ ceil(budget/G)` alternative commitments `E_1…E_J`, all at `S`'s commitment num
   aggregate voucher output of `j·G`** paying `R`.
 - The aggregate voucher is **bare-sig, not hash-locked**: spendable by `R`'s sig alone
   (a returning `R` may have none of the packages, so its claim must need only its keys),
-  by `S` after `T_exp` (CLTV timeout branch), or by the revocation path (standard, so
-  the state remains penalizable if later revoked). Script: the BOLT 3 offered-HTLC
-  template with the hash branch replaced by a bare remote-sig branch; exact script and
-  weight in Appendix B (TBD).
+  by `S` after `T_exp` (CLTV timeout branch, revocation-delayed), or by the revocation
+  path (standard, so the state remains penalizable if later revoked). Exact script,
+  witnesses, weights, and the deterministic construction of each `E_j` are normative in
+  **Appendix B**.
 - Amounts are known at setup (they are `j·G`, not payment-dependent), which is what
-  makes pre-signing possible at all.
+  makes pre-signing possible at all. `G` MUST be an integer multiple of 1000 msat and
+  ≥ the voucher dust floor (§8), so every aggregate voucher is whole-satoshi and
+  untrimmed.
 
 Rules:
 - `S` MAY broadcast exactly one `E_j` only if `current height > D + escape_delay`
@@ -687,9 +689,10 @@ aggregation and payer-side choice are out of scope.
 (`option_ff_receive`). Liquidity-ads extension TLV for advertised terms: TBD. All
 numbers provisional pending bLIP assignment.
 
-Appendices TBD: (A) canonical `C_i^R` construction test vectors; (B) escape aggregate
-voucher script + weights; (C) tower provisioning/authentication wire format;
-(D) taproot variant.
+Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
+`ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
+below; (C) tower provisioning/authentication wire format — TBD; (D) taproot variant —
+TBD.
 
 ---
 
@@ -742,3 +745,132 @@ the revocation-secret-as-first-preimage evidence binding, uniform-expiry voucher
 pre-signed granular escapes, and batch reconciliation), such that the payer-side payment
 *completes* while the recipient is offline — the property neither hold-based nor
 async-payment designs provide.
+
+---
+
+## Appendix B: escape commitments and the aggregate voucher (normative)
+
+### B.1 Deterministic construction of `E_j`
+
+Each escape `E_j` (`j = 1…J`, `J = ceil(budget_msat / G)`) is a standard BOLT 3
+commitment transaction **for `S`** at commitment number `n0 + 1` (using `S`'s
+per-commitment point for that index, which `R` holds from the last pre-epoch
+`revoke_and_ack`), derived from the pre-epoch quiescent state as follows:
+
+1. `S`'s `to_local_msat` is reduced by `j·G`. (The §7.2 budget check —
+   `budget ≤ spendable − reserve − G` — guarantees `S` stays at or above
+   `channel_reserve` even at `j = J`, where `j·G` may exceed `budget` by up to `G`.)
+2. One **aggregate voucher output** of `j·G` msat is added, with the P2WSH witness
+   script of §B.2. Because `G` is a multiple of 1000 msat (§10), the output value is
+   whole-satoshi with no sub-satoshi remainder; because `G ≥` the voucher dust floor
+   (§8), it is never trimmed.
+3. The funder pays the commitment-fee delta for the added output (+172 WU, §B.4) at the
+   frozen epoch feerate, per BOLT 3.
+4. Output ordering, anchors, dust handling, and the obscured commitment-number encoding
+   in `nLockTime`/`nSequence` follow BOLT 3 unchanged.
+5. If the channel carries a bLIP-51 lease with `S` as lessor, `S`'s `to_local` retains
+   its lease CLTV encumbrance on every `E_j` (§11.3). The aggregate voucher (an `R`
+   output) is never lease-encumbered.
+
+`R`'s `escape_sigs[j−1]` (§7.4) is its ordinary funding-key ECDSA `SIGHASH_ALL`
+signature on `E_j`. Both sides MUST derive the set independently and byte-identically;
+`S` MUST verify every signature before `ff_begin`, and MUST refuse the epoch otherwise.
+
+There are **no second-level transactions**: unlike a BOLT 3 offered HTLC, whose timeout
+path is a 2-of-2 routed through a pre-signed HTLC-timeout transaction so the CSV
+revocation-delay can ride on top of the CLTV, the aggregate voucher applies both
+timelocks directly in-script on `S`'s single-sig branch (§B.2). The `escape_htlc_sigs`
+field stays empty in v1.
+
+### B.2 Aggregate voucher witness script
+
+P2WSH. `revocationpubkey` is the standard BOLT 3 revocation key for `S`'s commitment
+`n0 + 1`; `local_delayedpubkey` is `S`'s delayed-payment key at that per-commitment
+point (matching `to_local` semantics); `payment_basepoint(R)` is `R`'s **static**
+payment basepoint, untweaked.
+
+```
+OP_DUP OP_HASH160 <RIPEMD160(SHA256(revocationpubkey))> OP_EQUAL
+OP_IF
+    # Path 1 — revocation: R (or its tower) penalizes a revoked escape
+    OP_CHECKSIG
+OP_ELSE
+    OP_NOTIF
+        # Path 2 — S refund after voucher expiry, revocation-delayed
+        <T_exp> OP_CHECKLOCKTIMEVERIFY OP_DROP
+        <to_self_delay> OP_CHECKSEQUENCEVERIFY OP_DROP
+        <local_delayedpubkey> OP_CHECKSIG
+    OP_ELSE
+        # Path 3 — R claim: bare sig, 1-block CSV (anchor pinning rule)
+        OP_1 OP_CHECKSEQUENCEVERIFY OP_DROP
+        <payment_basepoint(R)> OP_CHECKSIG
+    OP_ENDIF
+OP_ENDIF
+```
+
+Witness stacks (top element last):
+
+| Path | Witness | Tx requirements |
+|---|---|---|
+| 1 revocation | `<rev_sig> <revocationpubkey>` | none |
+| 2 `S` refund | `<S_sig> <>` | `nLockTime ≥ T_exp`, input `nSequence = to_self_delay` |
+| 3 `R` claim | `<R_sig> <0x01>` | input `nSequence ≥ 1` |
+
+*Rationale.* The leading `OP_DUP OP_HASH160 … OP_EQUAL` revocation gate is the BOLT 3
+offered-HTLC pattern verbatim. The `OP_NOTIF` selector takes exactly `<>` or `<0x01>`,
+satisfying the segwit v0 `MINIMALIF` standardness rule (as does the outer `OP_IF`, which
+consumes `OP_EQUAL`'s output). Path 3 deliberately mirrors the anchors `to_remote`
+output (static key + `1 OP_CSV`): a returning `R` that has lost *all* epoch data can
+locate and claim the aggregate voucher from its seed and the funding outpoint alone — no
+packages, no per-commitment points, no tower. Path 2 keeps a revoked escape penalizable:
+after reconciliation reveals the `n0 + 1` secret, a cheating `S` broadcasting any `E_j`
+must still wait `to_self_delay` blocks before sweeping, the standard justice window.
+
+### B.3 Script size
+
+115 bytes, itemized (with `T_exp` as a 3-byte scriptnum — any height up to 8,388,607 —
+and `to_self_delay` as a 2-byte scriptnum, its full BOLT 2 range):
+
+| Fragment | Bytes |
+|---|---|
+| `OP_DUP OP_HASH160 <20> OP_EQUAL` | 24 |
+| `OP_IF OP_CHECKSIG OP_ELSE OP_NOTIF` | 4 |
+| `<T_exp> OP_CLTV OP_DROP` | 6 |
+| `<to_self_delay> OP_CSV OP_DROP` | 5 |
+| `<33> OP_CHECKSIG` (path 2 key) | 35 |
+| `OP_ELSE OP_1 OP_CSV OP_DROP` | 4 |
+| `<33> OP_CHECKSIG` (path 3 key) | 35 |
+| `OP_ENDIF OP_ENDIF` | 2 |
+| **Total** | **115** |
+
+### B.4 Weights
+
+Commitment-side: the aggregate voucher adds one P2WSH output = `8 + 1 + 34 = 43` bytes
+= **172 WU** to `E_j` versus the pre-epoch commitment (fee delta borne by the funder at
+the frozen feerate, §B.1 step 3).
+
+Spend-side (worst-case 72-byte DER+sighash signatures; witness serialization includes
+the count byte and per-item length prefixes; script push = `1 + 115`):
+
+| Path | Witness WU | Marginal input WU (input 164 + witness) | 1-in/1-out sweep to P2WPKH, total WU (vB) |
+|---|---|---|---|
+| 3 `R` claim | 192 | 356 | 522 (130.5) |
+| 2 `S` refund | 191 | 355 | 521 (130.25) |
+| 1 revocation | 224 | 388 | 554 (138.5) |
+
+(Sweep total = 328 WU non-witness for a minimal 1-in/1-out tx — version, counts, a
+41-byte input, a 31-byte P2WPKH output, locktime — plus 2 WU marker/flag plus the
+witness. The revocation row is the *marginal* cost per escape-voucher input inside a
+larger justice transaction; a real penalty sweep amortizes overhead across all of
+`E_j`'s outputs.)
+
+### B.5 Consistency requirements
+
+- `S` MUST NOT broadcast any `E_j` except under the §10 conditions (height
+  `> D + escape_delay`, reconciliation not begun), and MUST use `j = ceil(owed/G)`.
+- `R` and `T` treat *any* `E_j` on-chain after reconciliation as a revoked-state breach
+  (path 1), and any `E_j` before reconciliation as an escape to be audited against the
+  package history (§12.1).
+- Implementations MUST reject `ff_init` where `G > 0` and `G` violates §10's
+  multiple-of-1000/dust-floor constraints, or where `J·G − budget ≥ G` (malformed
+  granularity).
