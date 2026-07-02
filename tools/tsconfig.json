@@ -1,0 +1,5 @@
+{
+	"//": "ts-node project file for generate-ffor-vectors.ts. Reuses the beignet repo's compiler options (the generator imports beignet from source). Run from the beignet repo root: npx ts-node -P ../specs/tools/tsconfig.json ../specs/tools/generate-ffor-vectors.ts",
+	"extends": "../../beignet/tsconfig.json",
+	"include": ["./*.ts", "../../beignet/src/**/*.ts"]
+}

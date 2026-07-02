@@ -299,14 +299,21 @@ reconstruct it byte-for-byte from the epoch parameters plus the settlement histo
   - `payment_hash = H_k`
   - `cltv_expiry = T_exp` (uniform for the epoch)
 - `S`'s `to_local` is reduced by `Σ v_k` (plus per-HTLC commitment weight fee, borne by
-  the funder per BOLT 3 — deterministic at the frozen feerate).
-- Output ordering, dust trimming, anchors: exactly per BOLT 3.
+  the funder per BOLT 3 — deterministic at the frozen feerate). Millisatoshi rounding is
+  BOLT 3's: each voucher output is floored to whole satoshis and the sub-satoshi
+  remainder stays with the offerer's (`S`'s) `to_local` — normative, since `R` and `T`
+  must reconstruct `C_i^R` byte-exactly.
+- Output ordering, dust trimming, anchors: exactly per BOLT 3. Note that BOLT 3 output
+  order is **not** voucher sequence order (vouchers sort by amount/scriptpubkey like any
+  output); anything keyed "per voucher" on the wire maps by commitment output index, not
+  by `seq`.
 
 Constraints `S` MUST enforce before accepting delegated payment `i`:
 
 - `htlc_amount_i ≥ min_payment_msat` and `v_i` above the voucher dust floor
-  (`dust_limit + HTLC-success fee at the frozen feerate`) — a trimmed voucher would be
-  uncollectible on-chain.
+  (`dust_limit + HTLC-success fee at the frozen feerate`; under
+  `option_anchors_zero_fee_htlc_tx` the second term is zero, so the floor is exactly
+  `dust_limit`) — a trimmed voucher would be uncollectible on-chain.
 - `Σ_{k≤i} v_k ≤ budget_msat`; `i ≤ K ≤ max_accepted_htlcs` and within
   `max_htlc_value_in_flight` semantics (vouchers occupy real HTLC slots and weight).
 - `S`'s post-update balance ≥ `channel_reserve`.
@@ -315,6 +322,11 @@ Constraints `S` MUST enforce before accepting delegated payment `i`:
 On failure of any check, `S` MUST NOT settle: it either fails the upstream HTLC
 (`temporary_node_failure`) or falls back to hold-and-wake if separately supported
 (§11.4).
+
+Byte-accurate test vectors for this construction (`C_0…C_3`, three settlements,
+computed and independently verified against a real BOLT 3 implementation) are in the
+companion file `ffor-test-vectors.md` (Appendix A), with a reproducible generator under
+`tools/`.
 
 **Why an HTLC and not a balance increase?** Three reasons. (1) *Expiry*: the timeout
 branch returns the funds to `S` at `T_exp` if `R` never comes back — without it, `S`'s
@@ -338,9 +350,9 @@ never received (§9.2 ordering makes this window `S`-safe in both variants).
 | `htlc_amount_msat` | u64 | as received upstream |
 | `voucher_amount_msat` | u64 | `v_i`; MUST equal `htlc_amount − fee(htlc_amount)` |
 | `r_commitment_number` | u64 | `n_R + i` |
-| `commitment_sig` | 64 | `S`'s signature on `C_i^R` |
+| `commitment_sig` | 64 | `S`'s signature on `C_i^R` (BOLT 2 compact 64-byte encoding, as in `commitment_signed`) |
 | `num_htlc_sigs` | u16 | = i |
-| `htlc_sigs` | i×64 | `S`'s signatures for the HTLC-success spend of **every** voucher output on `C_i^R`, BOLT 3 output order (`SIGHASH_SINGLE|ANYONECANPAY`, anchor rules) |
+| `htlc_sigs` | i×64 | `S`'s signatures (compact encoding) for the HTLC-success spend of **every** voucher output on `C_i^R`, in BOLT 3 commitment **output-index order** — not voucher `seq` order (§8) — (`SIGHASH_SINGLE|ANYONECANPAY`, anchor rules) |
 | TLV 1: `revocation_secret_n0` | 32 | **REQUIRED in `seq == 1`, both variants**: `per_commitment_secret_S[n0]`. This is the *pre-revocation*: from this moment `S` has no broadcastable state. |
 | TLV 3: `preimage` | 32 | Variant A only: `P_i` |
 | TLV 5: `upstream_scid` | 8 | optional, audit |
