@@ -2,10 +2,11 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.5 (2026-07-02) — hardened by computed test vectors (Appendix A) and
-  a working M1–M4 prototype (beignet `feat/ffor`: on-chain enforcement and the
-  Variant B tower both bitcoind-validated, including the S-vanishes recovery gate);
-  wire details below reflect what the prototype actually implements
+- Status: Draft v0.6 (2026-07-03) — hardened by computed test vectors (Appendix A) and
+  a working M1–M5 prototype (beignet `feat/ffor`: on-chain enforcement, the Variant B
+  tower, and the full escape lifecycle all bitcoind-validated; Appendix B's script and
+  weight tables confirmed exact on regtest); wire details below reflect what the
+  prototype actually implements
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -456,8 +457,11 @@ basepoints, `dust_limit`, `to_self_delay`, frozen feerate, **channel type, both
 channel configs** (reserve / max-in-flight / HTLC-slot limits — the §8 checks need
 them), **`R`'s channel role** (opener vs acceptor fixes the commitment layout), the
 **pre-epoch balances and both commitment numbers** (deterministic `C_i^R`
-reconstruction starts from them)), `R`'s pre-shared per-commitment points, the hash
-list with preimages `t_1…t_K`, and `S`'s `per_commitment_point[n0]`. The hash set
+reconstruction starts from them), the **funder identity and both sides'
+`to_self_delay`**, and — when escapes are in use — **`S`'s
+`per_commitment_point[n0 + 1]`** (escape recognition needs the aggregate-voucher
+script, §10/§B.2)), `R`'s pre-shared per-commitment points, the hash list with
+preimages `t_1…t_K`, and `S`'s `per_commitment_point[n0]`. The hash set
 travels `T → R` during provisioning and `R` commits it on the wire in `ff_init` TLV 1;
 if `R` generates the preimages instead, it hands them to `T` here — either way `T`
 holds all preimages and `R` is the one that binds the hashes into the epoch.
@@ -531,7 +535,10 @@ ceil(budget/G)` alternative commitments `E_1…E_J`, all at `S`'s commitment num
 
 Rules:
 - `S` MAY broadcast exactly one `E_j` only if `current height > D + escape_delay`
-  (recommended `escape_delay ≥ 2016`) **and** reconciliation has not begun. It MUST
+  **and** reconciliation has not begun. `escape_delay` is fixed at **2016 blocks** in
+  v1 (a protocol constant, not negotiated — `R` must be able to rely on it when
+  reasoning about how late it can return before `S`'s escape window opens; a future
+  version may make it a negotiated `ff_init` TLV). It MUST
   choose `j = ceil(owed/G)` — rounding **up**, so `S` bears the rounding cost (≤ G) and
   gains nothing from escaping; broadcasting `j < ceil(owed/G)` under-credits `R` and is
   provable fraud bounded by `owed − j·G` (packages at `T` prove `owed`; the chain proves
@@ -586,7 +593,11 @@ legal in FF_EPOCH):
    `TLV 1 revocation_secret_n0: 32 (iff j == 0 — otherwise it went out in package 1)`,
    `TLV 3 revocation_secret_n0plus1: 32 (iff escapes were signed)`.
    `R` MUST verify each secret against its stored points. All escapes are now toxic to
-   `S`; `T` can stand down at end of epoch.
+   `S`; `T` can stand down at end of epoch. Note the division of labor: `T` can
+   penalize only `C_{n0}^S` (its secret arrives in package 1) — the escape revocation
+   secret (`n0 + 1`) is revealed only here, at reconciliation, when `R` is back. For
+   escapes, `T` is therefore structurally **alert-only**; only `R` penalizes a stale
+   `E_j` (§B.5's "`R` (or its tower)" applies to `C_{n0}^S`, not to escapes).
 4. **`ff_revoke_batch`** (type 55019, R→S):
    `{count: u16, secrets: count×32}` — `R`'s per-commitment secrets for its skipped
    indexes `n_R … n_R + j − 1` (its pre-epoch state and every superseded `C_k^R`,
@@ -874,6 +885,11 @@ per-commitment point for that index, which `R` holds from the last pre-epoch
 1. `S`'s `to_local_msat` is reduced by `j·G`. (The §7.2 budget check —
    `budget ≤ spendable − reserve − G` — guarantees `S` stays at or above
    `channel_reserve` even at `j = J`, where `j·G` may exceed `budget` by up to `G`.)
+   All escape quantities are defined against the **frozen pre-epoch state**: the
+   pre-epoch balances, `S`'s per-commitment point at `n0 + 1`, and the funder identity
+   MUST be snapshotted at setup — reconciliation later moves the live balances,
+   commitment numbers, and point pipeline, and without the snapshot an implementation
+   cannot rebuild, recognize, or penalize an escape afterwards.
 2. One **aggregate voucher output** of `j·G` msat is added, with the P2WSH witness
    script of §B.2. Because `G` is a multiple of 1000 msat (§10), the output value is
    whole-satoshi with no sub-satoshi remainder; because `G ≥` the voucher dust floor
@@ -963,8 +979,12 @@ Commitment-side: the aggregate voucher adds one P2WSH output = `8 + 1 + 34 = 43`
 = **172 WU** to `E_j` versus the pre-epoch commitment (fee delta borne by the funder at
 the frozen feerate, §B.1 step 3).
 
-Spend-side (worst-case 72-byte DER+sighash signatures; witness serialization includes
-the count byte and per-item length prefixes; script push = `1 + 115`):
+Spend-side. The table assumes **worst-case 72-byte DER+sighash signatures** — live
+RFC 6979 low-S signatures are frequently 71 bytes, making real witnesses 1 WU smaller
+per path; validate against the worst case. (These numbers, and the 115-byte script
+length above, were confirmed exactly by the reference implementation against bitcoind.)
+Witness serialization includes the count byte and per-item length prefixes; script push
+= `1 + 115`:
 
 | Path | Witness WU | Marginal input WU (input 164 + witness) | 1-in/1-out sweep to P2WPKH, total WU (vB) |
 |---|---|---|---|
