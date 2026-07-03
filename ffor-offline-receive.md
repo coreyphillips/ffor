@@ -526,6 +526,25 @@ tower reduces Variant B trust to "R keeps one keyless-or-scoped-key box online" 
 is precisely the watchtower assumption Lightning already makes, now also covering
 receipt.
 
+**Role-separation (normative).** `T` MUST NOT be the same node as `S` for the epoch it
+serves: a node that is both the settlement peer and the tower can settle upstream and
+withhold the credit *alone*, which voids Variant B's entire guarantee (theft would no
+longer require two parties to collude — it collapses to Variant A). A tower
+implementation MUST therefore reject a provisioning whose `s_node_id` equals its own
+node id; it SHOULD likewise reject one whose `r_node_id` equals its own (a node is
+offline exactly when it is `R`, so it cannot be its own tower). This matters most for a
+**node-embedded tower** (an ordinary Lightning node that also offers tower service): it
+must serve only epochs where it is neither `S` nor `R`.
+
+**Node-embedded tower breach-watch (normative for that deployment).** Where `T` runs
+inside a full node, the "chain feed is out of scope" caveat tightens: such a `T` MUST
+watch each provisioned epoch's **funding outpoint** on its own chain feed, and on a
+spend route the full spending transaction to the breach classifier (§12.1); on a
+revoked `C_{n0}^S` it MAY (option a) broadcast the justice transaction via its node's
+broadcaster and MUST at least alert (option b). It MUST re-arm these funding-outpoint
+watches on restart from the durable provisioning (the §9.4 restart contract), since `R`
+is offline and cannot re-request them.
+
 ---
 
 ## 10. Escape: `S`'s unilateral exit (optional, `G > 0`)
