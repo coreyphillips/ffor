@@ -848,12 +848,13 @@ aggregation and payer-side choice are out of scope.
 `channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLV 55007: FFOR standing terms
-(§11.3). All numbers provisional pending bLIP assignment.
+(§11.3). Tower transport messages 55031–55041 (Appendix C). All numbers provisional
+pending bLIP assignment.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
-below; (C) tower provisioning/authentication wire format — TBD; (D) taproot variant —
-TBD.
+below; (C) tower transport (provisioning/authentication wire format) — below;
+(D) taproot variant — TBD.
 
 ---
 
@@ -1044,3 +1045,66 @@ larger justice transaction; a real penalty sweep amortizes overhead across all o
 - Implementations MUST reject `ff_init` where `G > 0` and `G` violates §10's
   multiple-of-1000/dust-floor constraints, or where `J·G − budget ≥ G` (malformed
   granularity).
+
+---
+
+## Appendix C: tower transport (provisioning / authentication wire format)
+
+Variant B needs `R` and `S` to reach the tower `T` over an authenticated channel.
+This appendix specifies the **direct BOLT-8** transport the reference implementation
+uses (beignet M7.1): `T` is reached as a directly-dialed BOLT-8 peer
+(`nodeId@host:port`). Onion-message indirection, for the case where `S` should not
+learn `T`'s network identity, is an optional privacy upgrade left to a future revision.
+The three logical operations (§9.4) — provision, release, fetch — are carried as
+request/response pairs of custom, odd (ignorable) peer messages. Numbers are provisional
+pending bLIP assignment; all multi-byte integers are big-endian.
+
+### C.1 Messages
+
+Every request begins with a 16-byte `request_id`, echoed in its response, so a client
+can correlate replies over the fire-and-forget peer transport (it keys pending requests
+by `request_id` with a timeout). Every message body also begins with the standard
+`channel_id`/`epoch_id` framing where noted below.
+
+| Type | # | Dir | Body |
+|---|---|---|---|
+| `ff_tower_provision` | 55031 | R→T | `[16: request_id][provisioning bundle]` (the §9.4 provisioning object, serialized) |
+| `ff_tower_ack` | 55033 | T→R | `[16: request_id][1: ok][2: err_len][err_len: error]` |
+| `ff_tower_release` | 55035 | S→T | `[16: request_id][ff_settlement payload]` (the raw §9.1 package) |
+| `ff_tower_release_resp` | 55037 | T→S | `[16: request_id][1: ok]` then ok ⇒ `[2: seq][32: preimage]`, else `[2: err_len][error]` |
+| `ff_tower_fetch` | 55039 | R→T | `[16: request_id][32: epoch_id][32: nonce][64: signature]` (§9.4 fetch request) |
+| `ff_tower_fetch_resp` | 55041 | T→R | `[16: request_id][1: ok]` then ok ⇒ `[4: last_released][2: num_packages]{[4: len][package]}*[2: num_preimages]{[32: preimage]}*`, else `[2: err_len][error]` |
+
+The provisioning bundle serialization is defined by the durable-store format (§9.4 /
+Appendix C reference implementation) and MUST round-trip the preimages, channel static
+parameters, both sides' basepoints/configs, `S`'s per-commitment points at `n0` and (if
+escapes) `n0 + 1`, and any option-(a) scoped revocation secret + sweep script.
+
+### C.2 Authentication — two independent layers
+
+- **Access control = the Noise-authenticated peer identity.** BOLT-8 already
+  authenticates the sending peer's node id, so `T` gates each operation on it, with no
+  additional bearer token: `ff_tower_provision` MUST originate from the epoch's `R`
+  (matched against `r_node_id` inside the provisioning bundle, since the epoch is not yet
+  known to `T`); `ff_tower_release` MUST originate from that epoch's `S`; `ff_tower_fetch`
+  MUST originate from that epoch's `R`. A mismatch is rejected regardless of payload
+  validity.
+- **Evidence = the per-message node-key signatures** (the fetch digest of §9.4, the
+  package signatures of §9.1). These are the §12.2 non-repudiation layer and are verified
+  **independently** of, and in addition to, the access-control check — e.g. a fetch with
+  a validly-signed digest is still rejected if it arrives from a peer other than the
+  epoch's `R`.
+
+### C.3 Size bound
+
+An `ff_tower_provision` message MUST fit the 65535-byte peer-message limit. At
+approximately 203 bytes per delegated payment (preimage + hash + per-commitment point,
+plus a fixed ~2.6 KB of channel static parameters) this bounds a single-message epoch at
+`K ≈ 305`. Typical epochs have `K` in the low tens, so this is not a practical
+constraint; an implementation supporting `K > ~305` MUST chunk the provisioning across
+multiple messages (a future extension).
+
+### C.4 Durability
+
+A tower answering these messages MUST persist provision and release state per the §9.4
+restart contract, so both survive a tower restart while `R` is offline.
