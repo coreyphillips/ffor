@@ -47,4 +47,4 @@ payment completes while the recipient is offline.
 
 ## License
 
-CC0 1.0 Universal.
+MIT.

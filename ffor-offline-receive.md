@@ -7,7 +7,7 @@
   prototype actually implements
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
-- License: CC0
+- License: MIT
 
 ---
 
