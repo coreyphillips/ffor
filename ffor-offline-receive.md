@@ -2,9 +2,10 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.3 (2026-07-02) — hardened by computed test vectors (Appendix A) and
-  a working M1+M2 prototype (beignet `feat/ffor`); wire details below reflect what the
-  prototype actually implements
+- Status: Draft v0.4 (2026-07-02) — hardened by computed test vectors (Appendix A) and
+  a working M1–M3 prototype (beignet `feat/ffor`, on-chain enforcement
+  bitcoind-validated); wire details below reflect what the prototype actually
+  implements
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -290,7 +291,9 @@ disconnect. `R` MAY also remain online; an epoch with zero settlements is closed
 cooperatively with `ff_end` at any time.
 
 Both sides MUST persist the full epoch state (parameters, hashes, points, escape sigs,
-invoice set) durably before `ff_begin`.
+invoice set) durably before `ff_begin`. `R` MUST also have an on-chain sweep
+destination provisioned before going offline — every unilateral remedy in §11–§12
+needs one.
 
 Setup lifetime and quiescence exit:
 - Nothing before `ff_begin` is durable except epoch_id-uniqueness tracking: a
@@ -336,7 +339,11 @@ Constraints `S` MUST enforce before accepting delegated payment `i`:
 - `htlc_amount_i ≥ min_payment_msat` and `v_i` above the voucher dust floor
   (`dust_limit + HTLC-success fee at the frozen feerate`; under
   `option_anchors_zero_fee_htlc_tx` the second term is zero, so the floor is exactly
-  `dust_limit`) — a trimmed voucher would be uncollectible on-chain.
+  `dust_limit`) — a trimmed voucher would be uncollectible on-chain. The floor
+  guarantees only that the output *exists*, not that it is economically enforceable: a
+  near-floor voucher cannot pay for its own second-level claim plus CSV sweep, making
+  it collectible only cooperatively. `R` SHOULD size `min_payment_msat` against
+  expected on-chain enforcement cost at realistic feerates, not against the trim floor.
 - `Σ_{k≤i} v_k ≤ budget_msat`; `i ≤ K ≤ min(max_accepted_htlcs of both sides)` —
   vouchers are `S`-offered and `R`-accepted, so both limits bind — and within
   `max_htlc_value_in_flight` semantics (vouchers occupy real HTLC slots and weight).
@@ -430,6 +437,15 @@ holds no successor (that would need `R`'s signature). Consequences, by design:
   live state. (In Variant A, `P_1 = per_commitment_secret_S[n0]` makes the upstream
   claim of payment 1 *itself* the act of revocation — see §12.1. `P_{2…K}` are ordinary
   random preimages; nothing remains to revoke.)
+
+**Classification rule (normative — and easy to get wrong):** after the pre-revocation,
+`S`'s bookkeeping still calls index `n0` its *current* commitment. A node MUST treat
+any counterparty commitment **whose revocation secret it holds** as revoked, regardless
+of commitment-number comparisons. Standard BOLT 5 implementations that decide
+revoked-vs-current by index alone will misclassify this breach as a current-state close
+and never penalize it. (Empirically hit by the reference implementation's resolver;
+fixed by consulting the secret store in both the number-match and equal-number
+disambiguation branches.)
 
 ### 9.4 Tower requirements (Variant B)
 
@@ -560,7 +576,13 @@ legal in FF_EPOCH):
    channel balance with zero new machinery. If `S` stalls here and `T_exp` approaches,
    `R` force-closes `C_j^R` and claims every voucher on-chain via its pre-signed
    HTLC-success transactions (that is what the `htlc_sigs` in package `j` are for),
-   with anchor CPFP as usual.
+   with anchor CPFP as usual. **Enforcement never requires the reconcile handshake**:
+   adopting `C_j^R` needs only the validated packages, so `R` MAY force-close directly
+   from FF_EPOCH — e.g. when `S` refuses reconciliation entirely (§12.1) or on an
+   `ff_error` protocol violation after `ff_begin`. Implementation note: attaching
+   CPFP/fee inputs to an HTLC-success transaction changes its txid; downstream
+   spent-output tracking must match by the preserved `SIGHASH_SINGLE|ANYONECANPAY`
+   input 0 (outpoint + witness), never by txid.
 
 `ff_error` (type 55023, body `[u16: len][len: data]` after the standard header, BOLT 1
 error style) aborts setup (before `ff_begin`, ending the quiescence session, §7.5) or
@@ -680,7 +702,8 @@ Stated plainly: (1) Variant A's bounded withholding exposure; (2) `payment_secre
 unenforced (mitigated by single-use hashes); (3) amount attestation is amountless-grade
 (§13.3); (4) `R` must return before `T_exp` or its claims rest on `S`'s honesty /
 escape rounding; (5) `S` learns `R`'s offline schedule and all payment amounts (it
-learns the latter as last hop today anyway).
+learns the latter as last hop today anyway); (6) vouchers below the economic
+enforcement threshold (§8) are collectible only from a cooperative `S`.
 
 ---
 
