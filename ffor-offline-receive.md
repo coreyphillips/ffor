@@ -717,6 +717,16 @@ enforcement rather than aborting.
   **≥ advertised** (overpaying is acceptable), `budget_msat ≤ max_budget_msat`, epoch
   length ≤ `max_epoch_blocks`, and a variant whose bit is set; `S` rejects an
   out-of-terms `ff_init` with `ff_error`.
+- **Tower discovery**: a tower `T` MAY advertise its service in its own
+  `node_announcement` via TLV **55043**, a 19-byte record
+  `{tower_fee_base_msat: u32, tower_fee_ppm: u32, max_budget_msat: u64,
+  max_epoch_blocks: u16, variants: u8 bitfield}` (same field order convention as 55007).
+  The dial endpoint is **not** in the TLV — it is the announcement's standard BOLT-7
+  `addresses`, so a discovered tower is reached at `node_id@host:port`. `R` selects a
+  tower from the gossip graph (filtering by variant and `max_budget_msat`) instead of
+  configuring one out-of-band; the chosen `T` is then named in `ff_init` (§7.1 tower
+  TLVs) so `S` can reach it. This is discovery only — the trust model is unchanged, and
+  the §9.4 role-separation rule still applies (`R` MUST NOT pick a `T` that is its `S`).
 - **On return**: vouchers convert to in-channel balance (no on-chain footprint), after
   which `R` can splice-out revenue, `S` can splice-in to replenish sell-side inventory,
   and the next epoch can begin. `R` SHOULD size a revenue splice-out to respect its
@@ -866,8 +876,9 @@ aggregation and payer-side choice are out of scope.
 
 `channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Feature bits
-560/561 (`option_ff_receive`). `node_announcement` TLV 55007: FFOR standing terms
-(§11.3). Tower transport messages 55031–55041 (Appendix C). All numbers provisional
+560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
+§11.3) and 55043 (tower service advertisement, §11.3). Tower transport messages
+55031–55041 (Appendix C). All numbers provisional
 pending bLIP assignment.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
