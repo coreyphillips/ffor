@@ -25,18 +25,27 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 ## Reference implementation
 
 Prototyped in [beignet](https://github.com/coreyphillips/beignet) on the
-[`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor) branch.
-Milestones M1 (epoch setup, state machine, persistence) and M2 (variant-A settlement,
-reestablish, reconciliation) are complete: a payer's payment completes end-to-end while
-the recipient is offline, verified in tests at the built-package boundary, with the
-spec's test vectors reproduced byte-exactly by the implementation.
+[`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor) branch. **All
+six prototype milestones are complete** and every gate is validated against live
+regtest bitcoind:
+
+- **M1/M2** — epoch setup, variant-A settlement, reconciliation: a payer's payment
+  completes end-to-end while the recipient is offline; the spec's test vectors are
+  reproduced byte-exactly by the implementation.
+- **M3** — on-chain enforcement: recipient force-close with voucher sweeps, and the
+  revoked-state justice path.
+- **M4** — the Variant B tower: settlement is gated on tower-held preimages; the
+  recipient recovers all funds from the tower alone after the settlement peer vanishes.
+- **M5** — escapes: the full pre-signed escape lifecycle (broadcast, seed-only voucher
+  claim, timeout refund, stale-escape penalty); Appendix B's script and weight tables
+  confirmed exact on-chain.
+- **M6** — liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
+  splice-on-return, and a 21-case crash matrix covering every protocol arrow.
 
 ## Status
 
 Draft. Wire details reflect what the prototype actually implements; message type and
-feature bit numbers are provisional pending bLIP assignment. Remaining prototype
-milestones: on-chain enforcement (M3), tower (M4), escapes (M5), liquidity
-integration + chaos testing (M6).
+feature bit numbers are provisional pending bLIP assignment.
 
 ## Prior art
 

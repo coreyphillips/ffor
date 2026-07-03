@@ -2,11 +2,12 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.6 (2026-07-03) — hardened by computed test vectors (Appendix A) and
-  a working M1–M5 prototype (beignet `feat/ffor`: on-chain enforcement, the Variant B
-  tower, and the full escape lifecycle all bitcoind-validated; Appendix B's script and
-  weight tables confirmed exact on regtest); wire details below reflect what the
-  prototype actually implements
+- Status: Draft v0.7 (2026-07-03) — hardened by computed test vectors (Appendix A) and
+  a **complete M1–M6 prototype** (beignet `feat/ffor`: on-chain enforcement, the
+  Variant B tower, the full escape lifecycle, bLIP-51 lease integration, and a 21-case
+  crash matrix — all gates bitcoind-validated; Appendix B's script and weight tables
+  confirmed exact on regtest); wire details below reflect what the prototype actually
+  implements
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -569,10 +570,22 @@ the catch-up commitment in step 2. Mismatch rules: an `S` reporting no epoch mea
 setup never completed and `R` MUST discard (§7.5); conversely, if `R` reports no epoch
 while `S` has `last_seq > 0`, `S` MUST retain the epoch and respond `ff_error` — `S`
 holds voucher obligations and MUST NOT forget them; `S` MAY discard only at
-`last_seq == 0`. `S`'s `last_seq` is **authoritative** for the replay count, and `S`
-MUST send its `channel_reestablish` before any replayed packages (replay ordering
-relies on transport FIFO). Then, from quiescence (automatic — no other updates are
-legal in FF_EPOCH):
+`last_seq == 0`. Symmetrically, once settlements exist **neither** side may discard on
+a TLV-less reestablish: `R`'s packages and preimages are its only claim on the
+credited vouchers, so an `S` that stops sending the TLV after settlements is treated
+as misbehaving (`R` enforces on-chain per step 6) — the §7.5 discard rule applies only
+while `R` holds zero settlement evidence. `S`'s `last_seq` is **authoritative** for
+the replay count, and `S` MUST send its `channel_reestablish` before any replayed
+packages (replay ordering relies on transport FIFO). During an epoch and
+reconciliation, the standard `next_commitment_number` / `next_revocation_number`
+validation needs an FFOR carve-out: commitment numbers advance out-of-band (packages,
+catch-up commitment), so peers MUST tolerate the fast-forwarded numbers and reconcile
+via the FFOR TLVs, not the standard fields. Every reconciliation message is
+**idempotent**: each of the replayed packages, `ff_reconcile`, `ff_reconcile_ack`,
+`ff_revoke_batch`, and `ff_end` MUST be safely re-processable (or re-sendable) after a
+reconnect at any point, and a peer that has already closed the epoch MUST answer a
+still-reconciling peer's reestablish with `ff_end`, not an error. Then, from
+quiescence (automatic — no other updates are legal in FF_EPOCH):
 
 1. **Replay**: `S` re-sends `ff_settlement` for `seq 1…j`. `R` independently fetches
    packages/preimages from `T` (Variant B) or its mailbox and cross-checks; any
@@ -612,7 +625,11 @@ legal in FF_EPOCH):
    channel balance with zero new machinery. If `S` stalls here and `T_exp` approaches,
    `R` force-closes `C_j^R` and claims every voucher on-chain via its pre-signed
    HTLC-success transactions (that is what the `htlc_sigs` in package `j` are for),
-   with anchor CPFP as usual. **Enforcement never requires the reconcile handshake**:
+   with anchor CPFP as usual. In Variant B the post-reconcile tower fetch is
+   **REQUIRED** for this step, not optional: `S`'s replay cannot carry preimages
+   (§9.1's preimage TLV is Variant A only), so without the fetch `R` cannot fulfill
+   its vouchers; towers MUST keep serving fetches after reconciliation completes.
+   **Enforcement never requires the reconcile handshake**:
    adopting `C_j^R` needs only the validated packages, so `R` MAY force-close directly
    from FF_EPOCH — e.g. when `S` refuses reconciliation entirely (§12.1) or on an
    `ff_error` protocol violation after `ff_begin`. Implementation note: attaching
@@ -660,13 +677,19 @@ enforcement rather than aborting.
   `R` leases inbound (`S`'s local balance) sized to expected offline volume, then opens
   the epoch. An FFOR budget is, economically, a *use* for a liquidity lease while the
   buyer sleeps.
-- **Advertising**: `S` SHOULD advertise standing FFOR terms alongside its lease rates —
-  proposed odd TLV in the liquidity-ads extension carrying
-  `{ff_fee_base_msat, ff_fee_ppm, max_budget_msat, max_epoch_blocks, variants}` —
-  letting `R` price uptime+delegation the same way it prices inbound capacity today.
+- **Advertising**: `S` SHOULD advertise standing FFOR terms alongside its lease rates:
+  `node_announcement` TLV **55007**, a 19-byte record
+  `{ff_fee_base_msat: u32, ff_fee_ppm: u32, max_budget_msat: u64, max_epoch_blocks:
+  u16, variants: u8 bitfield}` — letting `R` price uptime+delegation the same way it
+  prices inbound capacity today. "Echoing the terms" in `ff_init` means: fee fields
+  **≥ advertised** (overpaying is acceptable), `budget_msat ≤ max_budget_msat`, epoch
+  length ≤ `max_epoch_blocks`, and a variant whose bit is set; `S` rejects an
+  out-of-terms `ff_init` with `ff_error`.
 - **On return**: vouchers convert to in-channel balance (no on-chain footprint), after
   which `R` can splice-out revenue, `S` can splice-in to replenish sell-side inventory,
-  and the next epoch can begin. Note the pleasant asymmetry with hold-based schemes:
+  and the next epoch can begin. `R` SHOULD size a revenue splice-out to respect its
+  `channel_reserve` — splicing out the full converted revenue can dip below reserve
+  and block subsequent payments. Note the pleasant asymmetry with hold-based schemes:
   FFOR consumes no route CLTV, jams no third-party channels, and parks no sender
   capital — the only locked resource is `S`'s balance in a channel that `R`'s absence
   idles anyway.
@@ -811,8 +834,8 @@ aggregation and payer-side choice are out of scope.
 
 `channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Feature bits
-560/561 (`option_ff_receive`). Liquidity-ads extension TLV for advertised terms: TBD.
-All numbers provisional pending bLIP assignment.
+560/561 (`option_ff_receive`). `node_announcement` TLV 55007: FFOR standing terms
+(§11.3). All numbers provisional pending bLIP assignment.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
