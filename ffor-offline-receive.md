@@ -475,16 +475,29 @@ Verification checklist before releasing `t_i` — `T` MUST verify:
    against `S`'s funding pubkey; every `htlc_sig` verifies against `S`'s `htlc_pubkey`
    derived at `r_per_commitment_points[i]`.
 4. If `seq == 1`: `revocation_secret_n0 · G == per_commitment_point_S[n0]`.
-5. Package stored durably. Only then release `t_i`.
+5. Package stored durably. Only then release `t_i`. "Durably" means the store commit is
+   **fsync-backed before the preimage is returned** — power-loss durable, not merely
+   written to an OS buffer — since a preimage released against a package that a crash
+   then loses is exactly the §9.4 loss.
+
+Restart contract (normative — a durable tower must survive process restart with `R`
+offline the whole time, so it cannot rely on `R` re-supplying anything):
+- `T` MUST persist the **full provisioning bundle** — preimages `t_1…t_K`, channel
+  static parameters (§9.4 list), both sides' basepoints/configs, `S`'s per-commitment
+  points at `n0` and (if escapes) `n0 + 1`, and any option-(a) scoped revocation secret
+  + sweep script — not merely the settlement record. `R` is offline across the restart
+  and cannot re-provision, so a tower that persisted only `last_released` + the packages
+  would come back unable to verify new packages or release their preimages.
+- On restart `T` MUST rehydrate **every** persisted epoch (a tower serves many) and,
+  with no `R` involvement, continue to: (a) serve released preimages idempotently by
+  `seq`; (b) **reject a differing package for an already-released `seq`** (the two
+  signed copies are §12.2 evidence); and (c) verify and release the *next* `seq` — which
+  requires the rehydrated provisioning, not just the record.
 
 Release semantics: `ff_release` MUST be **idempotent by `seq`** (an `S` that crashes
 after the tower stored-and-released but before fulfilling upstream re-requests the same
-`seq` and gets the same `t_i`); after any restart `T` MUST still serve every preimage
-it has ever released and MUST reject a *different* package for an already-released
-`seq` (persist `last_released` and the packages themselves — a released preimage
-without its stored package is exactly the loss §9.4 item 5 forbids). On rejection or
-non-response, `S` MUST fail the payment upstream: it has no preimage and no other safe
-move.
+`seq` and gets the same `t_i`). On rejection or non-response, `S` MUST fail the payment
+upstream: it has no preimage and no other safe move.
 
 Ongoing duties:
 - Serve stored packages and preimages to `R` on authenticated request — signature from
