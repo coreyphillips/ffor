@@ -2,21 +2,34 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.8 (2026-07-13), hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.9 (2026-07-13), hardened by computed test vectors (Appendix A) and
   a **complete M1–M6 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower, the full escape lifecycle, bLIP-51 lease integration, and a 21-case
   crash matrix — all gates bitcoind-validated; Appendix B's script and weight tables
   confirmed exact on regtest); wire details below reflect what the prototype actually
   implements
-- **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
+- **New in v0.9: honest exposure bounds, and a settlement profile that makes the §13.7
+  mitigation usable.** Three corrections to v0.8, all in the direction of *less* safety
+  than v0.8 claimed. (1) **`budget_msat` does not bound `R`'s loss** to a withholding `S`
+  in Variant A: the invoices are amountless and the budget check is one only an honest `S`
+  runs, so the exposure is bounded by what payers send (§12.1, §12.4). (2) §9.5.4's
+  hash-chain overlap was called "bounded by the budget"; it is **not**: it is §13.7, and
+  §13.7 is bounded by nothing. The chain is downgraded from RECOMMENDED to OPTIONAL
+  because it structurally requires `S` to serve invoices, the one configuration §13.7 says
+  to avoid (§9.5.4). (3) v0.8 recommended that `R` distribute its own invoices as the
+  §13.7 mitigation while mandating a **strictly ordered** settlement rule that made doing
+  so unusable (payers pay out of order and get failed; one non-payer stalls the epoch).
+  §7.3 adds an **unordered profile**, `ff_init.settlement_order`, which decouples `seq`
+  from the hash index and costs one redundant evidence channel (§7.2). The net: **§13.7,
+  not withholding, is the worst property in this spec**, and the "no server" result of
+  v0.8 does not reach it (§12.5, §13.7)
+- **From v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
   whole epoch and `R`'s on-chain claim needs only a preimage, which the payer necessarily
   holds. §12.5 states the bound the two cannot cross, and why no script, covenant or
-  taproot construction crosses it either. §13.7 records an invoice-reuse theft vector that
-  **no** variant currently closes, confirmed against the reference implementation.
-  §5.1's `to_self_delay` direction is confirmed against BOLT 2. Variant D itself is
-  unprototyped (M8, §15.1)
+  taproot construction crosses it either. §5.1's `to_self_delay` direction is confirmed
+  against BOLT 2. Variant D itself is unprototyped (M8, §15.1)
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -46,6 +59,16 @@ online can serve. An "LSP" is just the economically obvious candidate.
 The protocol requires no consensus changes and no changes to nodes other than `R`, `S`,
 and (optionally) `R`'s tower. Payers, routing nodes, and the rest of the network see a
 perfectly ordinary payment.
+
+**What is and is not secured.** `R`'s **principal**, the channel balance it had before
+the epoch, is secured by channel mechanics and is not at risk from `S` under any variant
+(§12.4). **Value sent to `R` during the epoch** is not fully secured: `S` can settle a
+payment upstream and withhold the credit (bounded and evidenced; impossible in Variant B),
+and `S` can redeem the same payment hash more than once, keeping everything after the
+first (**unbounded, evidence-free, and closed by no variant**; see §13.7). The second of
+these is an **open problem, not a theorem**, and its only mitigation today is to keep
+invoice distribution out of `S`'s hands, which requires `R` to know its payers before it
+goes offline. Read §4 and §13.7 before deploying this.
 
 ---
 
@@ -130,9 +153,13 @@ epochs.
 | Voucher minted | per payment, by `S`'s signature | per payment, by `S`'s signature | **all `K` at setup**, one stock channel update | per payment |
 | `S` broadcasts stale state | penalized (state revoked by first settlement; evidence reaches payer) | penalized (tower holds revocation from package 1) | penalized (pre-epoch state revoked by the setup update) | penalized |
 | `S` settles upstream but withholds the credit | **possible**; produces automatic cryptographic fraud proof (§12.2) | **impossible** without `S`+`T` collusion | possible, but `R`'s claim needs **only the preimage**, which the payer necessarily holds (§9.5) | impossible without collusion; collusion also cryptographically evidenced |
+| Bound on that exposure | **what payers send** (invoices are amountless, §12.1) | n/a | `budget_msat` (invoices are fixed-amount) | n/a |
+| **`S` redeems the same `H_k` twice (§13.7)** | **possible** | **possible** | **possible** | closed (unique per-payment secrets) |
+| Bound on *that* exposure | **none** (what payers send) | **none** | **none** | n/a |
 | `R` fabricates credit | impossible (`S` signed every voucher) | impossible | impossible while `S` generates the preimages; **possible** if `R`'s tower holds them (§9.5.2) | impossible |
 | `R` requirements while offline | none (mailbox recommended) | tower provisioned before epoch | **none** | tower |
 | Residual trust | `S`'s fear of provable fraud + penalty | `R`'s own tower (standard watchtower assumption) | 1-of-N availability over `{S, payers, any mailbox}` | minimal |
+| **Trust `S` not to reuse a hash** | **required** | **required** | **required** | not required |
 
 Variant A suits high-trust pairs (your own second node, a bonded/reputable peer).
 Variant B is the recommended default where an always-online agent of `R` is acceptable,
@@ -143,10 +170,21 @@ A, B and D share all setup messages and differ only in who generates payment has
 when preimages are released, and whether vouchers are minted during the epoch or at
 setup.
 
-The row that matters most is the pair `S settles upstream but withholds the credit` and
-`R fabricates credit`: **no variant sets both to "impossible" without an always-online
-third party**, and that is a theorem, not an omission. §12.5 gives the argument and
-shows why no script, covenant, or taproot construction changes it.
+Two rows carry the whole trust story, and they are different in kind.
+
+The pair `S settles upstream but withholds the credit` / `R fabricates credit` is a
+**theorem, not an omission**: no variant sets both to "impossible" without an
+always-online third party. §12.5 gives the argument and shows why no script, covenant, or
+taproot construction changes it. This is the bound the design is allowed to hit.
+
+The row **`S` redeems the same `H_k` twice** is not a theorem. It is an **open problem**
+(§13.7), it is the only exposure in this spec that is bounded by neither `budget_msat` nor
+anything else, and **no variant closes it**: not Variant B, whose tower is never
+consulted for the second redemption, and not Variant D, whose voucher book mints one
+output per hash however many times that hash is paid. Its only mitigation today is a
+distribution rule: **`R`, not `S`, must hand out the invoices** (§13.7, made workable by
+the unordered settlement profile of §7.3). Read the table with that row in mind, or the
+"impossible" cells in the Variant B column will mislead you.
 
 ---
 
@@ -254,6 +292,7 @@ not produce third-party-verifiable evidence.
 | Field | Size | Description |
 |---|---|---|
 | `variant` | u8 | 1 = A (self-contained), 2 = B (tower), 3 = C (PTLC, reserved, §13.5), 4 = D (pre-signed voucher book, §9.5) |
+| `settlement_order` | u8 | 0 = ordered (hash `i` settles at `seq i`), 1 = unordered (any unconsumed hash may settle at any `seq`). See §7.3. Variant D ignores this field (it has no `seq`); Variant D with the §9.5.4 hash chain is inherently ordered. |
 | `budget_msat` | u64 | max cumulative voucher value this epoch |
 | `max_payments` (`K`) | u16 | max number of delegated payments (≤ open HTLC slot budget, §8) |
 | `min_payment_msat` | u64 | below this, `S` MUST reject/fall back (≥ voucher dust floor, §8) |
@@ -282,17 +321,43 @@ echoes.
 | Field | Size | Description |
 |---|---|---|
 | `s_commitment_number` (`n0`) | u64 | explicit, to anchor evidence |
-| TLV 1: `payment_hashes` | K×32 | Variant A only: `S`-generated. **`H_1` MUST equal `SHA256(per_commitment_secret_S[n0])`** (§12.1) |
-| TLV 7: `s_htlc_id_base` | u64 | the HTLC id `S` assigns to voucher `seq 1`; voucher `seq i` gets id `base + i − 1`. Required — `R` cannot otherwise observe `S`'s offer counter, and reconciliation ends with `j` live HTLCs both sides must address by id. |
+| TLV 1: `payment_hashes` | K×32 | Variant A only: `S`-generated. Iff `settlement_order == 0`, **`H_1` MUST equal `SHA256(per_commitment_secret_S[n0])`** (§12.1). Under `settlement_order == 1` the binding is absent and the hashes carry no ordering semantics. |
+| TLV 7: `s_htlc_id_base` | u64 | the HTLC id `S` assigns to voucher `seq 1`; voucher `seq i` gets id `base + i − 1`. Required, since `R` cannot otherwise observe `S`'s offer counter, and reconciliation ends with `j` live HTLCs both sides must address by id. Note this indexes by settlement `seq`, not by hash index, and is therefore unaffected by `settlement_order`. |
 | `signature` | 64 | `S`'s node-key sig (proves `S` accepted budget/fee terms and hash set) |
 
 Requirements:
 - `S` MUST verify `budget_msat ≤ spendable local balance − channel_reserve − escape
   rounding slack (G)` and that `K` vouchers fit the commitment weight/slot budget (§8).
-- In Variant A, `R` cannot verify the `H_1` binding at setup (it would require the
-  secret); it is verified *ex post* at settlement 1 by checking
+- In Variant A under the ordered profile, `R` cannot verify the `H_1` binding at setup (it
+  would require the secret); it is verified *ex post* at settlement 1 by checking
   `preimage·G == per_commitment_point_S[n0]`. A false binding is detectable, attributable
   (both messages are signed), and grounds to blacklist `S` — see §12.1.
+
+**Why the `H_1` binding is ordered-only (and what the unordered profile gives up).** The
+binding's value is that `S`'s upstream fulfilment of payment 1 *is* its revocation of
+`C_{n0}^S`, so the payer and every routing node end up holding the revocation secret and
+`R` can recover it out-of-band. That works only if `S` knows in advance which hash will be
+paid first, which is exactly what the unordered profile gives up: under
+`settlement_order == 1`, `S` cannot predict the first hash, so no hash's preimage can be
+pre-committed to the secret.
+
+What is lost is **one redundant evidence channel**, in one scenario: an `S` that settles
+payment 1 upstream, issues no package, and then force-closes on `C_{n0}^S`. Under the
+ordered profile `R` recovers the revocation secret from the payer and takes `S`'s whole
+channel balance; under the unordered profile `R` has no secret (none was ever sent), so
+`C_{n0}^S` is `S`'s current valid state and the close is an ordinary force-close. `R`'s
+loss in both cases is the withheld payment; the ordered profile additionally *deters* it.
+
+What is **not** lost: the pre-revocation itself. §9.1's `revocation_secret_n0` TLV is
+still REQUIRED in the `seq == 1` package under both profiles, so an `S` that settles and
+*does* deliver a package still has no broadcastable state (§9.3), and the tower and
+penalty paths (§9.4, §12.1) are unaffected.
+
+Deployments therefore choose: ordered buys a deterrent against withholding at the cost of
+forcing `S` to serve invoices (which enables §13.7's unbounded theft); unordered buys the
+§13.7 mitigation at the cost of that deterrent. **Unordered is the better trade** (§13.7
+is unbounded and evidence-free, withholding is bounded and evidenced), and is therefore
+the RECOMMENDED profile. See §13.7.
 
 ### 7.3 `ff_invoices` (type 55005, R→S)
 
@@ -301,18 +366,62 @@ Requirements:
 | `num_invoices` | u16 | = K |
 | `invoices` | var | length-prefixed BOLT 11 strings |
 
-Each invoice: **amountless** (payer supplies the amount — `R` cannot pre-sign unknown
-amounts), payment hash `H_i`, expiry ≥ wall-clock estimate of `T_exp`, a route hint
+Each invoice: payment hash `H_i`, expiry ≥ wall-clock estimate of `T_exp`, a route hint
 `S → R`, `min_final_cltv_expiry` as usual (it binds `S`'s upstream acceptance, not the
-voucher), signed by `R`'s node key. These are single-use and **strictly ordered**: settlement
-`seq i` carries exactly `H_i` (§9.1), and the §7.2 `H_1` binding requires the first
-settled payment to be hash 1 — so `S` MUST serve invoice `i+1` only after `i` is
-consumed, MUST NOT settle the same hash twice, and MUST fail upstream any delegated
-hash arriving out of order.
+voucher), signed by `R`'s node key.
 
-Distribution: v1 leaves payer-side distribution out of scope — `S` MAY serve the next
-unused invoice via LNURL-pay-style endpoint, BOLT 12 message relay, or any out-of-band
-channel on `R`'s behalf. (BOLT 12 static-invoice integration: §13.2.)
+**Amount.** Invoices are **amountless** by default (the payer supplies the amount), which
+is what lets `R` pre-sign a set without knowing what it will be paid. This has a cost that
+v0.8 did not state: it removes `budget_msat` as a bound on `R`'s exposure to a withholding
+`S`, because the §8 budget check is only ever run by an `S` that is issuing packages
+(§12.1). `R` MAY instead pre-sign **fixed-amount** invoices (the Variant D construction,
+§9.5.1 step 3) in any variant, restoring the budget bound and repairing amount attestation
+(§13.3), at the cost of having to know its amounts at setup. Deployments that care about
+the bound SHOULD do so.
+
+**Single use.** Invoices are single-use in every variant and every profile. `S` MUST NOT
+settle the same hash twice. This is a MUST aimed at the party that would be cheating and
+is **not enforceable by `R` or `T`**; see §13.7, which is the most important limitation in
+this spec.
+
+**Settlement order** is governed by `ff_init.settlement_order`:
+
+- **`settlement_order == 1` (unordered, RECOMMENDED).** Any hash in the epoch set that has
+  not already been consumed may settle at any `seq`. `seq` remains a strictly sequential
+  *settlement counter* (1, 2, 3, …): it orders the packages, carries the pre-revocation
+  in `seq == 1`, and indexes `C_i^R` and the HTLC ids. But it **no longer indexes the
+  hash set**. The settling hash is named explicitly in the package (§9.1). `S` MUST fail
+  upstream any hash that is not in the epoch set or has already been consumed, and MUST
+  NOT reorder or refuse an otherwise-valid unconsumed hash.
+- **`settlement_order == 0` (ordered).** Settlement `seq i` carries exactly `H_i`. `S` MUST
+  serve invoice `i+1` only after `i` is consumed and MUST fail upstream any delegated hash
+  arriving out of order. Required if the §7.2 `H_1` binding is wanted, and inherent to the
+  §9.5.4 hash chain.
+
+**Why unordered exists (v0.9).** The ordered profile was the only profile in v0.8, and it
+is incompatible with the §13.7 mitigation it also mandates. §13.7 says `R` SHOULD hand out
+its own invoices out-of-band, one per payer, before going offline. Under the ordered
+profile `R` cannot: payers pay in whatever order they like, so every payer but one is
+failed upstream, and **a single invoice holder who never pays stalls the entire epoch at
+`seq 0`**, and no other payer can ever be settled. The ordered profile therefore forces `S`
+into the invoice-serving role, which is precisely the role that makes §13.7's unbounded
+theft available. Decoupling `seq` from the hash index costs nothing cryptographically
+(`C_i^R` remains deterministic: it is reconstructed from the *package history*, which `R`
+and `T` hold either way) and buys the safe configuration.
+
+Distribution:
+
+- **`R` distributes its own invoices, out-of-band, before going offline** (one per known
+  payer, per order). This is the **safe configuration** and the RECOMMENDED default. It
+  requires the unordered profile to be usable at all. `S` cannot induce a second payment
+  on a hash it was never able to hand out twice. It requires `R` to know its payers in
+  advance, and therefore does **not** serve the "receive from an arbitrary unknown payer"
+  case; there is no safe configuration for that case today (§13.7, §12.5).
+- **`S` serves `R`'s invoices** (LNURL-pay-style endpoint, BOLT 12 message relay, or any
+  out-of-band channel on `R`'s behalf). Convenient, and it is what the §9.5.4 hash chain
+  requires, but it hands `S` exactly the capability §13.7's attack needs. Use only where
+  `S` is trusted not to reuse. (BOLT 12 static-invoice integration: §13.2, which MUST NOT
+  place `S` in this role without a further binding.)
 
 *Privacy note:* `S` cannot decrypt the final onion hop (it is encrypted to `R`'s node
 key), so `payment_secret` is unenforced for delegated payments. This is acceptable:
@@ -378,11 +487,15 @@ reconstruct it byte-for-byte from the epoch parameters plus the settlement histo
 - Base state: the last co-signed pre-epoch state (balances, no HTLCs — quiescence
   guarantees this), at the frozen feerate.
 - Per-commitment point: `r_per_commitment_points[i]`.
-- Vouchers `1…i`: each voucher `k` is a **received HTLC** (from `R`'s perspective,
-  offered by `S`) with:
+- Vouchers `1…i`: voucher `k` is the credit for the payment settled at `seq k`. It is a
+  **received HTLC** (from `R`'s perspective, offered by `S`) with:
   - `amount_msat = v_k = htlc_amount_k − fee(htlc_amount_k)` where
     `fee(a) = fee_base_msat + a · fee_proportional_millionths / 10^6`
-  - `payment_hash = H_k`
+  - `payment_hash =` the hash settled at `seq k`, as named in package `k` (§9.1). Under
+    `settlement_order == 0` this is `H_k`; under `settlement_order == 1` it is whichever
+    unconsumed epoch hash that payment carried. Determinism is unaffected either way:
+    `C_i^R` is reconstructed from the **package history**, which both `R` and `T` hold,
+    not from the hash set's index order.
   - `cltv_expiry = T_exp` (uniform for the epoch)
 - `S`'s `to_local` is reduced by `Σ v_k` (plus per-HTLC commitment weight fee, borne by
   the funder per BOLT 3 — deterministic at the frozen feerate). Millisatoshi rounding is
@@ -438,8 +551,8 @@ never received (§9.2 ordering makes this window `S`-safe in both variants).
 
 | Field | Size | Description |
 |---|---|---|
-| `seq` (`i`) | u16 | 1-based, strictly sequential |
-| `payment_hash` | 32 | MUST equal `H_i` |
+| `seq` (`i`) | u16 | 1-based, strictly sequential **settlement counter** (not a hash index) |
+| `payment_hash` | 32 | Ordered profile: MUST equal `H_i`. Unordered profile: MUST be a member of the epoch hash set and MUST NOT have been consumed by an earlier `seq`. |
 | `htlc_amount_msat` | u64 | as received upstream |
 | `voucher_amount_msat` | u64 | `v_i`; MUST equal `htlc_amount − fee(htlc_amount)` |
 | `r_commitment_number` | u64 | `n_R + i` |
@@ -494,9 +607,11 @@ holds no successor (that would need `R`'s signature). Consequences, by design:
 - `S` cannot force-close to collect voucher timeouts before reconciliation; the escape
   path is its only unilateral exit.
 - Subsequent settlements reveal no further commitment secrets — index `n0` was the only
-  live state. (In Variant A, `P_1 = per_commitment_secret_S[n0]` makes the upstream
-  claim of payment 1 *itself* the act of revocation — see §12.1. `P_{2…K}` are ordinary
-  random preimages; nothing remains to revoke.)
+  live state. (In Variant A **under the ordered profile**, `P_1 = per_commitment_secret_S[n0]`
+  makes the upstream claim of payment 1 *itself* the act of revocation; see §12.1 and
+  §7.2. Under the unordered profile no preimage carries the secret, and revocation happens
+  only via the `seq == 1` package's TLV 1. The other preimages are ordinary random values;
+  nothing remains to revoke.)
 
 **Classification rule (normative — and easy to get wrong):** after the pre-revocation,
 `S`'s bookkeeping still calls index `n0` its *current* commitment. A node MUST treat
@@ -526,7 +641,13 @@ if `R` generates the preimages instead, it hands them to `T` here — either way
 holds all preimages and `R` is the one that binds the hashes into the epoch.
 
 Verification checklist before releasing `t_i` — `T` MUST verify:
-1. `seq == last_released + 1`; `payment_hash == H_seq`; height `< D`.
+1. `seq == last_released + 1`; height `< D`; and the hash rule for the epoch's profile:
+   ordered (`settlement_order == 0`) ⇒ `payment_hash == H_seq`; unordered
+   (`settlement_order == 1`) ⇒ `payment_hash` is in the epoch hash set **and is not in
+   `T`'s consumed-hash set**, which `T` maintains alongside `last_released` and MUST
+   persist (§9.4 restart contract). Note that under either profile this gates only the
+   **first** redemption of each hash: once `S` holds `t_k` it needs nothing further from
+   `T` to redeem `H_k` again upstream, which is §13.7 and which `T` cannot see.
 2. `voucher_amount == htlc_amount − fee(htlc_amount)`; `htlc_amount ≥ min_payment_msat`;
    cumulative `Σ v ≤ budget_msat`.
 3. Deterministic reconstruction of `C_i^R` (§8) succeeds; `commitment_sig` verifies
@@ -549,8 +670,11 @@ offline the whole time, so it cannot rely on `R` re-supplying anything):
 - On restart `T` MUST rehydrate **every** persisted epoch (a tower serves many) and,
   with no `R` involvement, continue to: (a) serve released preimages idempotently by
   `seq`; (b) **reject a differing package for an already-released `seq`** (the two
-  signed copies are §12.2 evidence); and (c) verify and release the *next* `seq` — which
-  requires the rehydrated provisioning, not just the record.
+  signed copies are §12.2 evidence); (c) **reject a package whose `payment_hash` is
+  already in the consumed-hash set**, under either profile; and (d) verify and release the
+  *next* `seq`, which requires the rehydrated provisioning, not just the record. The
+  consumed-hash set is part of the durable record, not a derived index: under the
+  unordered profile it cannot be recomputed from `last_released` alone.
 
 Release semantics: `ff_release` MUST be **idempotent by `seq`** (an `S` that crashes
 after the tower stored-and-released but before fulfilling upstream re-requests the same
@@ -688,19 +812,24 @@ costs `R` that voucher. Variant D lands at **Variant A's trust level with a far 
 recovery story**, not at Variant B's. §12.5 explains why that gap cannot be closed by
 script.
 
-#### 9.5.4 Hash-chained vouchers (RECOMMENDED)
+#### 9.5.4 Hash-chained vouchers (OPTIONAL, and only where `S` may serve invoices)
+
+> **Status change (v0.9).** This construction was RECOMMENDED in v0.8. It is downgraded
+> to OPTIONAL, and its interaction with §13.7 is restated below, because it **structurally
+> requires the one configuration §13.7 says to avoid**: `S` serving `R`'s invoices. Plain
+> Variant D (§9.5.1), with `K` independent preimages and `R` distributing its own
+> fixed-amount invoices, is the recommended server-free default.
 
 Instead of `K` independent preimages, derive them as a chain: `x_M` random,
 `x_{j−1} = SHA256(x_j)`. Voucher `j` is hash-locked to `x_{j−1}` (preimage `x_j`), of
 uniform amount `G`, with `budget = M · G`. Because knowing `x_m` derives every `x_j` for
 `j < m`, **the single most recent preimage unlocks `R`'s entire cumulative credit.**
 
+The upside is real:
+
 - `R` does not need to reach every payer. **One** source of the latest preimage recovers
   everything, which is what makes the payer-as-fallback story practical rather than
   theoretical. A Variant D mailbox, if `R` keeps one, is 32 bytes, overwritten in place.
-- Invoices MUST be served strictly in ascending level order and MUST NOT be reused
-  (§13.7). Revealing `x_m` publishes the preimage of every invoice at a level below `m`,
-  so an unserved lower-level invoice would become claimable by any node on its route.
 - Arbitrary multiples of `G`: `R` pre-signs one fixed-amount invoice per
   `(from_level p, to_level j)` pair, amount `(j − p)·G + fee`, `payment_hash = x_{j−1}`.
   `S` serves the pair matching the current level and the payer's amount. That is
@@ -708,10 +837,31 @@ uniform amount `G`, with `budget = M · G`. Because knowing `x_m` derives every 
   produce and ~1.5 MB to ship.
 - Fixed-amount invoices also repair §13.3: amount attestation stops being
   amountless-grade, because the invoice `R` signed states the amount.
-- `S` lying about the current level (serving a `(p, j)` pair whose `p` is below the true
-  level) undercredits `R` by the overlap. This is the §13.7 invoice-reuse attack in
-  another dress, is bounded by the budget, and is detectable from any two payer receipts
-  with overlapping levels. It adds no new trust class.
+
+The cost, stated at full strength rather than as a footnote:
+
+- **The level is global, so payers MUST be serialized.** `S` MUST serve invoices strictly
+  in ascending level order, one outstanding at a time, and MUST NOT reuse a level. If `S`
+  serves `(5, 8)` to one payer and `(5, 7)` to another concurrently, both settle, and the
+  overlap is silently absorbed by `S`: payers paid `5G`, `R` is credited `3G`. No
+  reservation/timeout protocol for the outstanding invoice is specified here, and a payer
+  who takes an invoice and never pays it stalls the level.
+- **The chain hands `S` a standing menu of reusable invoices.** Once the level reaches
+  `m`, `S` holds `x_m`, which is the preimage of **every** pre-signed `(p, j)` invoice
+  with `j ≤ m`, across a range of amounts. `S` can serve any of them to a new payer and
+  redeem it instantly with a token it already holds, crediting `R` nothing, without ever
+  re-serving the same invoice twice.
+- This is **the §13.7 invoice-reuse attack**, not a variant of it, and v0.8's claim that
+  it is "bounded by the budget" was **wrong**: like every form of §13.7, it is bounded
+  only by what payers actually send (§12.1). It is detectable only by cross-checking
+  payer receipts with overlapping levels, which requires `R` to reach the very payers the
+  chain exists to avoid having to reach, and there is no adjudication venue (§12.2).
+- Because §13.7's mitigation is "do not let `S` distribute invoices," and this
+  construction cannot work unless `S` distributes invoices (only `S` knows the current
+  level, and `R` is offline), **the chain and the §13.7 mitigation are mutually
+  exclusive.** Use the chain only where `S` is trusted not to reuse: a bonded peer, or
+  `R`'s own second node. It is not a general-purpose default and v0.8 was wrong to
+  present it as one.
 
 #### 9.5.5 Variant D with a tower (OPTIONAL, and a genuine trade)
 
@@ -956,12 +1106,34 @@ Attack surface, by actor:
 
 | Attack | Outcome |
 |---|---|
-| Broadcast pre-epoch state `C_{n0}^S` after any settlement | Revoked by package 1: penalized (tower or returned `R` takes everything). In Variant A the *upstream claim of payment 1 is itself the revocation* — `P_1 = per_commitment_secret_S[n0]`, so the payer and every upstream node hold the revocation evidence the moment the payment completes. A revocation secret is harmless to them (useless without `R`'s keys) but fatal to `S` if it ever cheats: `R` can even recover it from the payer's receipt out-of-band. A false `H_1` binding is detected at settlement 1 (`P_1·G ≠` point), is attributable via the signed `ff_accept`, and downgrades only this evidence channel — tower/penalty paths are unaffected. |
+| Broadcast pre-epoch state `C_{n0}^S` after any settlement | Revoked by package 1: penalized (tower or returned `R` takes everything). In Variant A **under the ordered profile** the *upstream claim of payment 1 is itself the revocation*: `P_1 = per_commitment_secret_S[n0]`, so the payer and every upstream node hold the revocation evidence the moment the payment completes. A revocation secret is harmless to them (useless without `R`'s keys) but fatal to `S` if it ever cheats: `R` can even recover it from the payer's receipt out-of-band. A false `H_1` binding is detected at settlement 1 (`P_1·G ≠` point), is attributable via the signed `ff_accept`, and downgrades only this evidence channel; tower/penalty paths are unaffected. **Under the unordered profile this channel is absent** (§7.2): `S` that settles and delivers no package at all never reveals the secret, so `C_{n0}^S` is not revoked and its broadcast is an ordinary force-close. `R`'s loss is the withheld payment either way; the ordered profile additionally deters it. |
 | Broadcast an escape early or with `j` too small | Escape ≠ revoked (unless reconciliation happened — then penalized). Early: `R` still gets ≥ owed (ceil rounding), `S` gains nothing and pays the rounding cost. Undersized: provable fraud bounded by `owed − j·G` (signed packages at `T` vs the chain). |
-| **Settle upstream, withhold the credit** (never deliver package, never broadcast) | **Variant B: impossible** — the preimage physically does not reach `S` until `T` durably holds the verified package; `R` recovers everything from `T` even if `S` vanishes. **Variant A: possible** — this is the variant's honest limitation. `R`'s loss is bounded by the epoch budget; the fraud is automatically evidenced (payer holds `R`-signed invoice + preimage; `S` signed `ff_accept` over the hash set; for payment 1 the preimage is also `S`'s own revocation secret). "Cheating is provable and bounded" rather than "impossible": use Variant A only where that suffices. |
+| **Settle upstream, withhold the credit** (never deliver package, never broadcast) | **Variant B: impossible**. The preimage physically does not reach `S` until `T` durably holds the verified package; `R` recovers everything from `T` even if `S` vanishes. **Variant A: possible, and NOT bounded by `budget_msat`** (see the exposure note below). **Variant D: possible, bounded by `budget_msat`** (its invoices are fixed-amount), and the payer holds `R`'s claim key (§9.5.3). The fraud is automatically evidenced in all cases (payer holds `R`-signed invoice + preimage; `S` signed `ff_accept` over the hash set; under the ordered profile the payment-1 preimage is also `S`'s own revocation secret). "Cheating is provable" rather than "impossible": use Variant A only where that suffices. |
 | Inflate `htlc_amount` / skim beyond fee | Package amounts are verified by `T` before release (B) and audited by `R` on return (A); signed packages make any inconsistency attributable. |
 | Refuse reconciliation / stall conversion | `R` force-closes `C_j^R` before `T_exp` and claims all vouchers via pre-signed HTLC-success txs. This is the standard unilateral-close cost, not a loss. |
 | **Reuse an invoice / settle the same `H_k` twice** | **Not closed by any variant.** A preimage is a bearer token: once `S` holds `t_k` it can fulfil *every* upstream HTLC carrying `H_k`, and the tower is never consulted for the second. `R` is credited once; `S` pockets the rest. Mitigation is a distribution rule, not a protocol gate: see §13.7. |
+
+#### What `budget_msat` does and does not bound (normative reading)
+
+`budget_msat` bounds **`S`'s honest capital commitment**: how much of `S`'s `to_local` an
+honest `S` will convert into vouchers, enforced by the §8 checks. It is **not**, in
+general, a bound on `R`'s loss, because the §8 checks are exactly the checks a cheating
+`S` declines to run.
+
+- **Variants A and B use amountless invoices** (§7.3): the payer supplies the amount. An
+  `S` that settles upstream and issues no package never evaluates `Σ v_k ≤ budget_msat`
+  at all, so a payer may pay any amount against any of the `K` invoices and `S` simply
+  keeps it. **Variant A's withholding exposure is therefore bounded by what payers
+  actually send, not by `budget_msat`.** Earlier drafts of this spec asserted the
+  budget bound here; that was wrong. Deployments that want a real cap on Variant A
+  exposure MUST pre-sign fixed-amount invoices (the Variant D construction of §9.5.1
+  step 3, which is available to A and B unchanged), accepting that `R` must then know
+  its amounts at setup.
+- **Variant D is budget-bounded** for a single settlement per hash, because its invoices
+  are fixed-amount and its voucher book has exactly one output per hash.
+- **Hash reuse (§13.7) is bounded by neither, in any variant.** It is bounded only by
+  what payers send, and it is not budget-bounded even in Variant D, whose per-hash
+  voucher is minted once no matter how many times `H_k` is redeemed upstream.
 
 ### 12.2 Fraud-proof inventory
 
@@ -997,13 +1169,29 @@ deviation unprofitable even in Variant A.
 
 ### 12.4 What is genuinely weaker than online receive
 
-Stated plainly: (1) Variant A's and Variant D's bounded withholding exposure; (2)
-`payment_secret` unenforced, and single-use hashes are an **assumption the protocol does
-not enforce** (§13.7); (3) amount attestation is amountless-grade (§13.3; Variant D's
-fixed-amount invoices repair this); (4) `R` must return before `T_exp` or its claims rest
-on `S`'s honesty / escape rounding; (5) `S` learns `R`'s offline schedule and all payment
-amounts (it learns the latter as last hop today anyway); (6) vouchers below the economic
-enforcement threshold (§8) are collectible only from a cooperative `S`.
+Stated plainly:
+
+1. **Withholding exposure.** Variant A: an `S` that settles upstream and issues no
+   package keeps the money, and with amountless invoices this is bounded by what payers
+   send, **not** by `budget_msat` (§12.1). Variant D: same attack, bounded by
+   `budget_msat`, and the payer holds `R`'s claim key.
+2. **Hash reuse (§13.7) is unbounded and closed by no variant.** It is the single worst
+   property in this spec, it is enabled precisely when `S` is the party serving `R`'s
+   invoices, and it produces no evidence `R` can ever act on.
+3. `payment_secret` is unenforced, and single-use hashes are an **assumption the protocol
+   does not enforce** (§13.7).
+4. Amount attestation is amountless-grade under the default A/B invoice construction
+   (§13.3); fixed-amount pre-signed invoices repair this in any variant.
+5. `R` must return before `T_exp` or its claims rest on `S`'s honesty / escape rounding.
+6. `S` learns `R`'s offline schedule and all payment amounts (it learns the latter as
+   last hop today anyway).
+7. Vouchers below the economic enforcement threshold (§8) are collectible only from a
+   cooperative `S`.
+
+What is **not** weaker: `R`'s **principal**. Every state `S` can broadcast is either
+revoked (and penalizable, §5.1) or strictly-better-for-`R`, and `R`'s `to_remote` is
+static-key and always claimable. Nothing in §12 lets `S` take `R`'s pre-epoch channel
+balance. The exposure in this spec is confined to **value sent to `R` during the epoch**.
 
 ### 12.5 Why an always-online agent is necessary (normative rationale)
 
@@ -1068,6 +1256,19 @@ exposure**, plus a free hand in how small the online agent gets:
 An implementation seeking "fully trustless with no server" should read this section as:
 **take §5.1 and §9.5, and accept that a settling-and-withholding `S` costs `R` at most the
 epoch budget and at least one unreachable payer.**
+
+That sentence is true of **withholding** and false of **hash reuse**, and the difference
+is the honest limit of the server-free result. §5.1 and §9.5 remove the tower from the
+*withholding* problem. They do not touch §13.7, whose only non-cryptographic mitigation is
+to keep invoice distribution away from `S`, which, for an `R` that wants to receive from
+an **arbitrary, unknown payer**, means putting an always-online party back in the picture
+to serve invoices and enforce single-use. **The intersection of "no server" and "receive
+from anyone" is therefore not covered by this spec.** It is covered by an `R` that knows
+its payers in advance and hands out its own invoices (§13.7, and see the unordered
+settlement profile of §7.3 that makes this actually workable), and it will be covered
+generally by BOLT 12 / PTLC payer-and-amount binding (§13.5). Until then, do not read
+§12.5 as saying the server is gone; read it as saying the server is gone from the problem
+§12.5 is about.
 
 ---
 
@@ -1155,17 +1356,33 @@ Single-use is enforceable only by whoever **distributes** the invoices:
   payer, per order). `S` then cannot induce a second payment on a hash it was never able
   to hand out twice. This is the safe configuration and **SHOULD be the v1 default**; it
   is also the configuration in which `R`'s pre-signed invoice set is a natural fit.
+  **This requires the unordered settlement profile** (`ff_init.settlement_order == 1`,
+  §7.3). v0.8 recommended this mitigation while mandating an ordered profile that made it
+  unusable: payers pay in arbitrary order, so under the ordered profile every payer but
+  one is failed upstream, and one invoice holder who never pays stalls the whole epoch.
+  v0.9 adds the unordered profile for exactly this reason.
 - **`S` serves `R`'s invoices.** `S` then holds exactly the capability this attack
   requires. §13.2's proposed convergence with async-payments invoice serving (a static
   invoice held by an always-online node) therefore **MUST NOT** place `S` in that role
   without a further binding. The natural candidate holder is `T`, which can enforce
-  single-use and which, under §9.5.5, is already the party gating each hash.
+  single-use and which, under §9.5.5, is already the party gating each hash. Note that
+  **§9.5.4's hash chain requires this configuration** (only `S` knows the current level),
+  which is why v0.9 downgrades the chain to OPTIONAL.
 - **Enforceable amount- and payer-binding** (BOLT 12, or PTLC proof-of-payment
   uniqueness, §13.5) closes it properly, by making each payment's secret distinct even on
   a reused offer.
 
 Until one of those lands, this bounds how much invoice distribution may be delegated to
 `S`, and it should be read as a constraint on §13.2's roadmap rather than a footnote.
+
+**The uncovered case, stated plainly.** The first mitigation requires `R` to know its
+payers before it goes offline. The second requires an always-online party. So an `R` that
+wants to **receive from an arbitrary, unknown payer with no server**, the mobile-wallet
+case that motivates offline receive in the first place, **has no mitigation available
+today.** §5.1 and §9.5 remove the server from the *withholding* problem (§12.5's theorem);
+they do not remove it from this one, which is not a theorem but an open problem. Any
+deployment targeting that case is trusting `S` not to reuse a hash, and should say so out
+loud.
 
 ---
 
@@ -1192,6 +1409,12 @@ point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Featur
 §11.3) and 55043 (tower service advertisement, §11.3). Tower transport messages
 55031–55041 (Appendix C). All numbers provisional
 pending bLIP assignment.
+
+**v0.9 wire change.** `ff_init` (55001) gains a fixed `settlement_order` u8 immediately
+after `variant` (§7.1). This is a breaking layout change against v0.8, taken while the
+message numbers are still provisional and unassigned. It allocates no new message type:
+the unordered profile changes only the *interpretation* of `ff_settlement.payment_hash`
+(§9.1) and the tower's checklist (§9.4), both of which already carry the hash explicitly.
 
 **Variant D (§9.5) allocates no new message types.** It uses `ff_init` (`variant = 4`),
 `ff_accept`, `ff_invoices` and `ff_begin` for setup, then nothing at all: the voucher book
@@ -1289,6 +1512,19 @@ transport.
    it characterizes the existing Variant B implementation and is already implemented
    (`tests/lightning/ffor-hash-reuse.test.ts`, in-memory, no bitcoind, green as of this
    writing).
+10. **M8.9: Unordered settlement (§7.3, v0.9).** `ff_init` with `settlement_order == 1`;
+   `R` hands `K` invoices to `K` payers out-of-band; the payers pay in a **deliberately
+   shuffled** order, and one invoice holder never pays at all. **Gate:** every payment that
+   is actually made settles (none is failed upstream for being out of order), the
+   non-payer does not stall the epoch, `C_j^R`'s vouchers carry the hashes in *settlement*
+   order, `R` and `T` both reconstruct `C_j^R` byte-exactly from the package history, and
+   reconciliation converts every voucher. The same run under `settlement_order == 0` MUST
+   fail all but the first payer, which is the v0.8 behaviour this milestone exists to
+   retire. Also assert the §7.2 consequence: under the unordered profile no preimage
+   equals `per_commitment_secret_S[n0]`, and the `seq == 1` package still carries it in
+   TLV 1. This milestone is the one that makes §13.7's recommended mitigation actually
+   deployable, and it is **not blocked on Variant D** either: the unordered profile applies
+   to Variants A and B, which are already implemented.
 
 ---
 
