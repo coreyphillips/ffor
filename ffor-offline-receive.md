@@ -2,12 +2,21 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.7 (2026-07-03) — hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.8 (2026-07-13), hardened by computed test vectors (Appendix A) and
   a **complete M1–M6 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower, the full escape lifecycle, bLIP-51 lease integration, and a 21-case
   crash matrix — all gates bitcoind-validated; Appendix B's script and weight tables
   confirmed exact on regtest); wire details below reflect what the prototype actually
   implements
+- **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
+  channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
+  pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
+  whole epoch and `R`'s on-chain claim needs only a preimage, which the payer necessarily
+  holds. §12.5 states the bound the two cannot cross, and why no script, covenant or
+  taproot construction crosses it either. §13.7 records an invoice-reuse theft vector that
+  **no** variant currently closes, confirmed against the reference implementation.
+  §5.1's `to_self_delay` direction is confirmed against BOLT 2. Variant D itself is
+  unprototyped (M8, §15.1)
 - Author: Corey Phillips (with Claude)
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -114,19 +123,30 @@ epochs.
 
 ## 4. Trust model overview
 
-| | Variant A (self-contained) | Variant B (tower-mediated) | Variant C (PTLC, future) |
-|---|---|---|---|
-| Preimage origin | `S` | `T` (released against verified package) | adaptor-composed `S`+`T` |
-| Payment clears for payer | instantly | instantly | instantly |
-| `S` broadcasts stale state | penalized (state revoked by first settlement; evidence reaches payer) | penalized (tower holds revocation from package 1) | penalized |
-| `S` settles upstream but withholds the credit | **possible**; produces automatic cryptographic fraud proof (§12.2) | **impossible** without `S`+`T` collusion | impossible without collusion; collusion also cryptographically evidenced |
-| `R` requirements while offline | none (mailbox recommended) | tower provisioned before epoch | tower |
-| Residual trust | `S`'s fear of provable fraud + penalty | `R`'s own tower (standard watchtower assumption) | minimal |
+| | Variant A (self-contained) | Variant B (tower-mediated) | Variant D (pre-signed book, §9.5) | Variant C (PTLC, future) |
+|---|---|---|---|---|
+| Preimage origin | `S` | `T` (released against verified package) | `S` (or `T`, §9.5.2) | adaptor-composed `S`+`T` |
+| Payment clears for payer | instantly | instantly | instantly | instantly |
+| Voucher minted | per payment, by `S`'s signature | per payment, by `S`'s signature | **all `K` at setup**, one stock channel update | per payment |
+| `S` broadcasts stale state | penalized (state revoked by first settlement; evidence reaches payer) | penalized (tower holds revocation from package 1) | penalized (pre-epoch state revoked by the setup update) | penalized |
+| `S` settles upstream but withholds the credit | **possible**; produces automatic cryptographic fraud proof (§12.2) | **impossible** without `S`+`T` collusion | possible, but `R`'s claim needs **only the preimage**, which the payer necessarily holds (§9.5) | impossible without collusion; collusion also cryptographically evidenced |
+| `R` fabricates credit | impossible (`S` signed every voucher) | impossible | impossible while `S` generates the preimages; **possible** if `R`'s tower holds them (§9.5.2) | impossible |
+| `R` requirements while offline | none (mailbox recommended) | tower provisioned before epoch | **none** | tower |
+| Residual trust | `S`'s fear of provable fraud + penalty | `R`'s own tower (standard watchtower assumption) | 1-of-N availability over `{S, payers, any mailbox}` | minimal |
 
 Variant A suits high-trust pairs (your own second node, a bonded/reputable peer).
-Variant B is the recommended default and is the configuration this spec centers.
-Both share all wire messages; they differ only in who generates payment hashes and when
-preimages are released.
+Variant B is the recommended default where an always-online agent of `R` is acceptable,
+and is the configuration this spec centers. **Variant D is the recommended default where
+it is not**: it requires no tower, no mailbox, and no per-payment message of any kind,
+at the cost of moving `R`'s recourse from a chosen agent to the payers themselves.
+A, B and D share all setup messages and differ only in who generates payment hashes,
+when preimages are released, and whether vouchers are minted during the epoch or at
+setup.
+
+The row that matters most is the pair `S settles upstream but withholds the credit` and
+`R fabricates credit`: **no variant sets both to "impossible" without an always-online
+third party**, and that is a theorem, not an omission. §12.5 gives the argument and
+shows why no script, covenant, or taproot construction changes it.
 
 ---
 
@@ -142,6 +162,44 @@ preimages are released.
 - The commitment feerate is **frozen** for the duration of the epoch at the last signed
   value (`update_fee` is impossible with `R` offline). Anchor outputs make this safe:
   fees are trivial at signing time and attached via CPFP at broadcast time.
+
+### 5.1 `to_self_delay` (RECOMMENDED; REQUIRED for watchtower-free operation)
+
+`R` SHOULD negotiate, at channel open, a `to_self_delay` on `S`'s outputs satisfying
+
+```
+to_self_delay_S  >  (T_exp − epoch_start) + safety_margin
+```
+
+for the longest epoch it ever intends to run on that channel.
+
+This is the single change that removes the *watching* role from FFOR entirely. Per
+BOLT 2, `to_self_delay` is chosen by each node and applies to **the other node's**
+`to_local` outputs, so `R` sets `S`'s delay unilaterally at open. With the inequality in
+force, `S`'s only revocable state (`C_{n0}^S`, revoked at settlement 1 in Variants A/B
+and at the setup update in Variant D) puts `S`'s funds behind a CSV that **outlives `R`'s
+entire offline window**. If `S` ever broadcasts it, `R` returns, observes the breach, and
+penalizes at leisure. **Nobody has to be watching the chain on `R`'s behalf.** `R`'s
+`to_remote` is unaffected (`option_static_remotekey`), and the escape refund path
+(Appendix B.2, Path 2) already carries `T_exp` CLTV plus `to_self_delay` CSV, so it
+composes without change.
+
+Caveats, in order of importance:
+
+- `to_self_delay` is fixed at channel open and cannot be renegotiated. An FFOR channel
+  MUST therefore be opened with its intended maximum epoch length already in mind;
+  retrofitting requires a new channel.
+- The cost lands on `S`: a slow **unilateral** exit outside epochs. Cooperative close is
+  unaffected, and during an epoch `S` already has no unilateral exit except the escape
+  (§9.3), so the marginal cost is small. `S`'s `max_to_self_delay` policy must accept the
+  value; an FFOR-aware `S` SHOULD.
+- `R` MUST still return before `T_exp`, which it must anyway (§12.4 item 4). The margin
+  should cover reorg depth plus the time `R` needs to notice and act after reconnecting.
+
+Deployments that prefer a short `to_self_delay` may instead keep a watching tower. §9.4's
+chain-watch duty, penalty capability, scoped `revocation_basepoint_secret` sharing,
+node-embedded breach-watch, and role-separation rule exist **only** for that case and are
+all dead code under §5.1.
 
 ---
 
@@ -195,7 +253,7 @@ not produce third-party-verifiable evidence.
 
 | Field | Size | Description |
 |---|---|---|
-| `variant` | u8 | 1 = A (self-contained), 2 = B (tower) |
+| `variant` | u8 | 1 = A (self-contained), 2 = B (tower), 3 = C (PTLC, reserved, §13.5), 4 = D (pre-signed voucher book, §9.5) |
 | `budget_msat` | u64 | max cumulative voucher value this epoch |
 | `max_payments` (`K`) | u16 | max number of delegated payments (≤ open HTLC slot budget, §8) |
 | `min_payment_msat` | u64 | below this, `S` MUST reject/fall back (≥ voucher dust floor, §8) |
@@ -547,7 +605,146 @@ is offline and cannot re-request them.
 
 ---
 
+### 9.5 Variant D: the pre-signed voucher book
+
+Variants A and B mint vouchers **during** the epoch: `S` signs a fresh commitment per
+payment and must then deliver it. Delivery is the whole problem, and the tower exists to
+force it. Variant D removes the problem instead of mediating it, by committing the entire
+voucher set **at setup**, in one ordinary channel update, and settling payments purely by
+preimage revelation.
+
+**`S` sends nothing to anyone during the epoch.** There is no settlement package, no
+`seq`, no unilateral fast-forward update, no pre-revocation, no tower call, and no
+channel message to `R`.
+
+#### 9.5.1 Construction
+
+Setup, from quiescence:
+
+1. `S` generates preimages `t_1…t_K` and sends `R` only the hashes `H_k = SHA256(t_k)`
+   (`ff_accept` TLV 1). **`R` MUST NOT learn any `t_k`.** This is load-bearing; see
+   "Why this is safe for `S`" below.
+2. `R` and `S` perform **one stock BOLT 2 commitment update** (`commitment_signed` and
+   `revoke_and_ack` in both directions) to a state carrying `K` `S`-offered HTLCs:
+   `(amount d_k, payment_hash H_k, cltv_expiry T_exp)`. Both sides end holding a normal,
+   mutually signed, non-revoked commitment. No new commitment format is involved, and
+   `S`'s pre-signed HTLC-success signatures for every voucher arrive in that one
+   `commitment_signed` (BOLT 2 `htlc_signatures`) rather than being re-sent per payment.
+3. `R` pre-signs one **fixed-amount** BOLT 11 invoice per voucher (amount
+   `d_k + fee(d_k)`, `payment_hash H_k`) and goes offline.
+
+`budget_msat = Σ d_k`. Note the capital difference from Variants A/B: `S`'s `to_local` is
+reduced by the **full budget for the whole epoch**, whether or not payments arrive, rather
+than converting progressively. Since the `S`↔`R` channel is unusable for routing during
+the epoch anyway (§3), the opportunity cost is close to what `S` already accepted.
+
+Settlement: on `update_add_htlc` with `payment_hash = H_k`, once the upstream HTLC is
+irrevocably committed and the §8 checks pass (`htlc_amount ≥ d_k + fee(d_k)`,
+height `< D`, upstream CLTV margin, and `H_k` not already settled), `S` fulfills upstream
+with `t_k`. That is the entire settlement procedure.
+
+Reconciliation: `R` reconnects, obtains the preimages of the settled vouchers, fulfills
+them with `update_fulfill_htlc`, and fails the rest with `update_fail_htlc`. One
+commitment round, entirely stock BOLT 2. §11's `ff_reconcile` / `ff_reconcile_ack` /
+`ff_revoke_batch` flow is not used.
+
+`R` never returns: `S` force-closes after `T_exp` and sweeps every unclaimed voucher via
+its ordinary HTLC-timeout path. This is precisely what §10's escapes existed to provide,
+so **Variant D needs no escape ladder**: `G`, `J`, `escape_delay`, `ff_escape_sigs`, the
+aggregate voucher script, and all of Appendix B drop out. `R`'s `to_remote` sits on-chain
+awaiting it, as before.
+
+#### 9.5.2 Why this is safe for `S` (normative)
+
+`S` generates the preimages, therefore **the only way `R` can ever hold `t_k` is if `S`
+revealed it, and `S` reveals it only to claim a real upstream HTLC.** `R`'s possession of
+`t_k` is self-certifying evidence that `S` was paid. That single sentence is the whole
+security argument for the `S` side, and it is why `R` MUST NOT generate the preimages in
+this variant: an `R` that knows `t_1…t_K` can claim the entire voucher book without a
+single payment ever arriving.
+
+The corollary is a hard rule for implementations: **`S` MUST NOT reveal `t_k` to any party
+before the upstream HTLC carrying `H_k` is irrevocably committed and fulfilled.** Pushing
+a preimage to a mailbox early converts a failed payment into free credit for `R`.
+
+#### 9.5.3 Why this is stronger for `R` than Variant A
+
+`R`'s on-chain claim requires **the preimage and nothing else**. The HTLC-success
+signatures arrived with the setup `commitment_signed`, so no signature is needed from `S`
+at claim time, and `R` needs no packages to enforce, only (optionally) to audit.
+
+This changes who can rescue `R`. Under Variant A a payer's preimage is useless to `R`,
+which still needs `S`'s package signature; under Variant D **the payer's proof-of-payment
+is `R`'s on-chain claim key**. And BOLT 2 forces `S` to publish it: to take the money, `S`
+must send `update_fulfill_htlc(t_k)` upstream, and it propagates back to the payer. `S`
+cannot claim the payment without handing the key to `R`'s voucher to a party that is not
+`S` and that has a relationship with `R`.
+
+`R`'s recovery set is therefore `{S, the payer, any mailbox R chose, R's own box}`: a
+**1-of-N availability assumption over independent parties** rather than trust in a single
+one, and `R` may enlarge N freely. What Variant D does **not** do is make withholding
+impossible: an `S` that settles and withholds, whose payer is also unreachable, still
+costs `R` that voucher. Variant D lands at **Variant A's trust level with a far better
+recovery story**, not at Variant B's. §12.5 explains why that gap cannot be closed by
+script.
+
+#### 9.5.4 Hash-chained vouchers (RECOMMENDED)
+
+Instead of `K` independent preimages, derive them as a chain: `x_M` random,
+`x_{j−1} = SHA256(x_j)`. Voucher `j` is hash-locked to `x_{j−1}` (preimage `x_j`), of
+uniform amount `G`, with `budget = M · G`. Because knowing `x_m` derives every `x_j` for
+`j < m`, **the single most recent preimage unlocks `R`'s entire cumulative credit.**
+
+- `R` does not need to reach every payer. **One** source of the latest preimage recovers
+  everything, which is what makes the payer-as-fallback story practical rather than
+  theoretical. A Variant D mailbox, if `R` keeps one, is 32 bytes, overwritten in place.
+- Invoices MUST be served strictly in ascending level order and MUST NOT be reused
+  (§13.7). Revealing `x_m` publishes the preimage of every invoice at a level below `m`,
+  so an unserved lower-level invoice would become claimable by any node on its route.
+- Arbitrary multiples of `G`: `R` pre-signs one fixed-amount invoice per
+  `(from_level p, to_level j)` pair, amount `(j − p)·G + fee`, `payment_hash = x_{j−1}`.
+  `S` serves the pair matching the current level and the payer's amount. That is
+  `M(M+1)/2` invoices; at `M = 100`, 5050 pre-signed invoices, a fraction of a second to
+  produce and ~1.5 MB to ship.
+- Fixed-amount invoices also repair §13.3: amount attestation stops being
+  amountless-grade, because the invoice `R` signed states the amount.
+- `S` lying about the current level (serving a `(p, j)` pair whose `p` is below the true
+  level) undercredits `R` by the overlap. This is the §13.7 invoice-reuse attack in
+  another dress, is bounded by the budget, and is detectable from any two payer receipts
+  with overlapping levels. It adds no new trust class.
+
+#### 9.5.5 Variant D with a tower (OPTIONAL, and a genuine trade)
+
+Variant D composes with a tower, and the tower it needs is trivial. If `T` (not `S`)
+generates the preimages and `S` must fetch `t_k` from `T` in order to settle at all, then
+**`T`'s release-and-log *is* the credit event**, because the voucher for `H_k` was signed
+into `R`'s commitment at setup. `T` records which `k` it released and hands those
+preimages to `R` on return.
+
+`T`'s verification checklist collapses to nothing. There is no package to verify, no
+`C_i^R` to reconstruct, no signature to check, no budget to track, no chain to watch.
+§9.4's provisioning bundle, restart contract, role-separation rule, and node-embedded
+breach-watch all disappear. `T` holds `K` secrets and a `K`-bit released bitmap:
+`32K + K/8` bytes and a release-idempotent-by-`k` API. An `S` that fetches `t_k` without a
+matching payment is **punished, not rewarded**: `T` will hand that preimage to `R`, who
+claims voucher `k` for free. `S` therefore only ever fetches against real payments.
+
+The trade, stated plainly rather than buried: **this configuration requires `S` to trust
+`T` not to release preimages to `R` early**, since an `R` holding `t_k` for an unpaid
+voucher can claim it. That is trust `S` must place in a party `R` chose, and it is the
+exact mirror of Variant B, where `R` trusts a party it chose. Pre-playing `R`'s half of
+the exchange is what moves the exposure across the table; §12.5 shows why one side or the
+other must bear it. Use §9.5.5 only where `S` accepts that exposure (bounded by the
+budget), for example between a user's own nodes or where `T` is bonded. Otherwise use
+plain Variant D (§9.5.1), where `S` generates the preimages and no tower exists at all.
+
+---
+
 ## 10. Escape: `S`'s unilateral exit (optional, `G > 0`)
+
+Escapes are a **Variant A/B mechanism**. Variant D (§9.5) needs none: its vouchers carry
+ordinary HTLC-timeout paths, so a vanished `R` is resolved by `S` force-closing after
+`T_exp` and sweeping them.
 
 If `R` never returns, `S` must not be locked forever. At setup, `R` pre-signs `J =
 ceil(budget/G)` alternative commitments `E_1…E_J`, all at `S`'s commitment number
@@ -764,6 +961,7 @@ Attack surface, by actor:
 | **Settle upstream, withhold the credit** (never deliver package, never broadcast) | **Variant B: impossible** — the preimage physically does not reach `S` until `T` durably holds the verified package; `R` recovers everything from `T` even if `S` vanishes. **Variant A: possible** — this is the variant's honest limitation. `R`'s loss is bounded by the epoch budget; the fraud is automatically evidenced (payer holds `R`-signed invoice + preimage; `S` signed `ff_accept` over the hash set; for payment 1 the preimage is also `S`'s own revocation secret). "Cheating is provable and bounded" rather than "impossible": use Variant A only where that suffices. |
 | Inflate `htlc_amount` / skim beyond fee | Package amounts are verified by `T` before release (B) and audited by `R` on return (A); signed packages make any inconsistency attributable. |
 | Refuse reconciliation / stall conversion | `R` force-closes `C_j^R` before `T_exp` and claims all vouchers via pre-signed HTLC-success txs. This is the standard unilateral-close cost, not a loss. |
+| **Reuse an invoice / settle the same `H_k` twice** | **Not closed by any variant.** A preimage is a bearer token: once `S` holds `t_k` it can fulfil *every* upstream HTLC carrying `H_k`, and the tower is never consulted for the second. `R` is credited once; `S` pockets the rest. Mitigation is a distribution rule, not a protocol gate: see §13.7. |
 
 ### 12.2 Fraud-proof inventory
 
@@ -799,12 +997,77 @@ deviation unprofitable even in Variant A.
 
 ### 12.4 What is genuinely weaker than online receive
 
-Stated plainly: (1) Variant A's bounded withholding exposure; (2) `payment_secret`
-unenforced (mitigated by single-use hashes); (3) amount attestation is amountless-grade
-(§13.3); (4) `R` must return before `T_exp` or its claims rest on `S`'s honesty /
-escape rounding; (5) `S` learns `R`'s offline schedule and all payment amounts (it
-learns the latter as last hop today anyway); (6) vouchers below the economic
+Stated plainly: (1) Variant A's and Variant D's bounded withholding exposure; (2)
+`payment_secret` unenforced, and single-use hashes are an **assumption the protocol does
+not enforce** (§13.7); (3) amount attestation is amountless-grade (§13.3; Variant D's
+fixed-amount invoices repair this); (4) `R` must return before `T_exp` or its claims rest
+on `S`'s honesty / escape rounding; (5) `S` learns `R`'s offline schedule and all payment
+amounts (it learns the latter as last hop today anyway); (6) vouchers below the economic
 enforcement threshold (§8) are collectible only from a cooperative `S`.
+
+### 12.5 Why an always-online agent is necessary (normative rationale)
+
+This section states a bound on the design space. It is here because the tower reads like
+an engineering compromise that a sufficiently clever script could remove, and it is not.
+
+At settlement time there are exactly **two digital items** in flight. `S` holds one: the
+preimage, without which it cannot claim upstream. `R` holds the other: consent to a
+commitment state that credits it. The protocol must exchange these **fairly, while `R` is
+asleep**. That is the fair-exchange problem, and *deterministic fair exchange without a
+trusted third party is impossible* (Pagnia and Gärtner 1999; Even, Goldreich and Lempel
+before them). See §16.
+
+Bitcoin normally sidesteps this, because the chain **is** the trusted third party: a
+hash-locked atomic swap is fair exchange with consensus as arbiter. But that construction
+requires **both parties to act**. `R` is offline by construction, so `R`'s half of the
+swap must be pre-played, and the design space forks into exactly three points, all three
+of which this spec now occupies:
+
+| | `R`'s half | `S` can withhold the credit | `R` can fabricate credit |
+|---|---|---|---|
+| Variants A/B | played live, per payment (`S`'s package signature mints the voucher) | **yes** (A) / no (B, `T` gates it) | no |
+| Variant D (§9.5) | **pre-played at setup** (vouchers exist from block one) | yes, but the payer holds the key | no, *while `S` holds the preimages* |
+| Variant D + tower (§9.5.5) | pre-played at setup | **no** | **yes**, if `R`'s tower leaks a preimage |
+
+Pre-playing `R`'s half protects `R` and exposes `S`. Not pre-playing it protects `S` and
+exposes `R`. Interposing `T` between the two items (Variant B) protects both, and costs an
+always-online party. **Someone has to hold the balance point, and script cannot hold it.**
+
+Concretely, and this is the answer to every "could we not just do it with
+scripts/taproot/covenants":
+
+- **Script cannot force a message to be sent.** `S` withholding a signature is invisible
+  to consensus. There is no opcode for "you did not send that."
+- **Script cannot prove a negative.** Every construction of the form "`S` must demonstrate
+  it did *not* settle payment `k`" fails, because knowledge is monotonic: `S` can never be
+  compelled to prove it does not know something. And the only positive evidence that a
+  settlement occurred, the preimage, is exactly what a cheating `S` withholds.
+- **Script cannot force `S` on-chain.** `S`'s only compelled on-chain action is the escape
+  (§10), and `S` escapes only when `R` has *vanished*, never in the case that matters. In
+  the cooperative-close case, nothing about the epoch ever touches the chain, so the chain
+  cannot adjudicate it.
+- **Covenants do not help.** CTV, CSFS, OP_VAULT and relatives constrain *how* an output
+  is spent, never *whether*. `S` can always decline to act.
+- **Taproot changes the encoding, not the game**, and neither do PTLCs on their own:
+  §13.5's Variant C still composes adaptor shares from `S` **and `T`**. The obstruction is
+  topological, not cryptographic. `S`'s upstream claim necessarily reveals its secret
+  *toward the payer*, because that is the direction the HTLC arrived from. `R` sits
+  **beside** the payment path, not at its end. No signature scheme relocates it.
+
+What survives this bound is not "trust a server" but a choice of **who bears a bounded
+exposure**, plus a free hand in how small the online agent gets:
+
+- §5.1's long `to_self_delay` removes the **watching** role entirely, with script, today.
+  Nothing in §9.4's chain-watch, penalty, or scoped-key machinery is needed under it.
+- §9.5 removes the **mediating** role by pre-playing `R`'s half, landing at Variant A's
+  trust level with the payer as a structurally guaranteed, independent holder of the
+  preimage, and with no online infrastructure of any kind.
+- §9.5.5 restores `R` to Variant B's guarantee with a tower reduced to a preimage store
+  and a released bitmap, at the cost of moving the exposure onto `S`.
+
+An implementation seeking "fully trustless with no server" should read this section as:
+**take §5.1 and §9.5, and accept that a settling-and-withholding `S` costs `R` at most the
+epoch budget and at least one unreachable payer.**
 
 ---
 
@@ -855,6 +1118,48 @@ One epoch per channel; `R` MAY run concurrent epochs on different channels with
 disjoint hash sets (each invoice's route hint pins its `S`). Cross-`S` budget
 aggregation and payer-side choice are out of scope.
 
+### 13.7 Invoice serving and hash reuse (open problem)
+
+A preimage is a **bearer token**. Once `S` holds `t_k`, it can fulfil *any* upstream HTLC
+carrying `H_k`, not merely the first. If a second payer pays an HTLC with
+`payment_hash = H_k`, `S` fulfils it from the `t_k` it already has: the tower is never
+consulted, no second package is ever created, `R` is credited **once**, and `S` pockets
+the second payment. `R` has no way to learn that it happened.
+
+**This is not closed by Variant B.** `T`'s gating binds only the *first* settlement on
+each hash; after that, `S` needs nothing from anyone. It is not closed by Variant D
+either, whose voucher book has exactly one output per hash. It is the one theft vector in
+this spec that no variant's cryptography addresses, and unlike Variant A's withholding it
+is **not bounded by the epoch budget**: it is bounded only by what payers actually send.
+
+Confirmed against the reference implementation (beignet `feat/ffor`), which is faithful to
+this spec and inherits the gap from it rather than introducing it: the settlement pipeline
+is `seq`-indexed throughout (`paymentHashes[seq − 1]`), the tower's `ff_release` is keyed
+and idempotent on `seq` and verifies only `payment_hash == H_seq`, and no settled-hash set
+exists on either side. Once `S` holds `t_k`, fulfilling a second upstream HTLC carrying
+`H_k` is an ordinary `update_fulfill_htlc` that re-enters neither the FFOR settlement path
+nor the tower. There is no gate to fail; there is simply no gate.
+
+§13.1's "`S` fails surplus parts carrying an already-settled hash" and §12.4's "mitigated
+by single-use hashes" are both MUSTs aimed squarely at the party that would be cheating.
+Single-use is enforceable only by whoever **distributes** the invoices:
+
+- **`R` distributes its own invoices out-of-band before going offline** (one per known
+  payer, per order). `S` then cannot induce a second payment on a hash it was never able
+  to hand out twice. This is the safe configuration and **SHOULD be the v1 default**; it
+  is also the configuration in which `R`'s pre-signed invoice set is a natural fit.
+- **`S` serves `R`'s invoices.** `S` then holds exactly the capability this attack
+  requires. §13.2's proposed convergence with async-payments invoice serving (a static
+  invoice held by an always-online node) therefore **MUST NOT** place `S` in that role
+  without a further binding. The natural candidate holder is `T`, which can enforce
+  single-use and which, under §9.5.5, is already the party gating each hash.
+- **Enforceable amount- and payer-binding** (BOLT 12, or PTLC proof-of-payment
+  uniqueness, §13.5) closes it properly, by making each payment's secret distinct even on
+  a reused offer.
+
+Until one of those lands, this bounds how much invoice distribution may be delegated to
+`S`, and it should be read as a constraint on §13.2's roadmap rather than a footnote.
+
 ---
 
 ## 14. Message and TLV registry (provisional)
@@ -880,6 +1185,16 @@ point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Featur
 §11.3) and 55043 (tower service advertisement, §11.3). Tower transport messages
 55031–55041 (Appendix C). All numbers provisional
 pending bLIP assignment.
+
+**Variant D (§9.5) allocates no new message types.** It uses `ff_init` (`variant = 4`),
+`ff_accept`, `ff_invoices` and `ff_begin` for setup, then nothing at all: the voucher book
+is committed by a stock BOLT 2 `commitment_signed` / `revoke_and_ack` round, settlement
+sends no message, and reconciliation is stock `update_fulfill_htlc` /
+`update_fail_htlc`. `ff_settlement`, `ff_escape_sigs`, `ff_reconcile`,
+`ff_reconcile_ack`, `ff_revoke_batch`, `ff_release` and the Appendix C tower transport are
+all **unused** in Variant D. `ff_accept` TLV 1 carries the hash set as usual; under
+`variant = 4` it is `S`-generated (§9.5.2). This is the registry's way of saying that
+Variant D is not an extension of the protocol but a large subtraction from it.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
@@ -914,6 +1229,50 @@ handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
    splice-on-return; crash matrix at every arrow in §6's diagram; multi-payment epochs
    at `K` and budget boundaries.
 
+### 15.1 M8: Variant D and watchtower-free operation
+
+M8 validates that the tower can be removed on both axes (§5.1 for watching, §9.5 for
+mediating). It should be cheaper than any prior milestone, because Variant D deletes
+machinery rather than adding it: no packages, no escapes, no unilateral updates, no tower
+transport.
+
+1. **M8.0: Watchtower-free penalty (§5.1).** Open a channel with
+   `to_self_delay_S > (T_exp − epoch_start) + margin`. Run any variant's epoch, have `S`
+   broadcast the revoked `C_{n0}^S` mid-epoch with nothing watching, bring `R` back after
+   the full offline window, and penalize. **Gate:** justice transaction confirms with
+   `R`'s CSV margin intact and no tower process ever running. Verifies that the §9.3
+   classification rule (treat any counterparty commitment whose revocation secret we hold
+   as revoked) still fires on a cold-start `R`.
+2. **M8.1: Voucher book setup.** `variant = 4` `ff_init`; `S`-generated hashes; the `K`
+   voucher HTLCs committed in one stock `commitment_signed` / `revoke_and_ack` round.
+   **Gate:** both sides hold a mutually signed, non-revoked commitment with `K` HTLC
+   outputs at `T_exp`; byte-exact against a BOLT 3 reference; `S`'s pre-signed
+   HTLC-success sigs verify for every voucher.
+3. **M8.2: Silent settlement.** Payer pays voucher `k`'s pre-signed invoice while `R` is
+   offline. **Gate:** payer sees SUCCESS; `S` sends **zero** messages to `R` and zero to
+   any tower for the whole epoch (assert on the wire log, not just on balances).
+4. **M8.3: Cooperative return.** `R` reconnects, obtains preimages, fulfils settled
+   vouchers, fails the rest. **Gate:** one commitment round, entirely stock BOLT 2;
+   balances correct; no FFOR message type sent after `ff_begin`.
+5. **M8.4: Withholding `S`, payer rescue.** `S` settles upstream, then vanishes without
+   revealing any preimage. `R` returns, obtains `t_k` **from the payer's receipt alone**,
+   force-closes, and sweeps voucher `k` via the setup-time HTLC-success signature.
+   **Gate:** `R` recovers the full voucher with no cooperation from `S` and no tower.
+   This is the milestone that proves §9.5.3.
+6. **M8.5: Hash chain (§9.5.4).** Chain-derived preimages; three payments at levels 1..3;
+   `R` obtains **only `x_3`** (from the most recent payer) and claims all three vouchers by
+   deriving `x_2`, `x_1`. **Gate:** all three sweep from a single 32-byte secret.
+7. **M8.6: `R` cannot fabricate credit.** Adversarial `R` attempts to claim a voucher
+   whose payment never arrived. **Gate:** claim is unconstructable (no preimage); and the
+   inverse test, an `S` that leaks `t_k` to a mailbox *before* the upstream HTLC is
+   irrevocably fulfilled, MUST be caught by the §9.5.2 ordering assertion.
+8. **M8.7: Vanished `R`.** No reconciliation; `S` force-closes after `T_exp` and sweeps
+   every unclaimed voucher via HTLC-timeout. **Gate:** `S` whole (no escape machinery
+   present in the build); `R`'s `to_remote` claimable whenever it returns.
+9. **M8.8: Hash reuse (§13.7), expected to FAIL.** Two payers pay the same `H_k`. Record
+   the loss. This is a **characterization test**, not a gate: it pins the open problem so
+   a future BOLT 12 / PTLC fix has a regression target.
+
 ---
 
 ## 16. Prior art and references
@@ -930,6 +1289,10 @@ handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
   trampoline-hold deployments: [eclair #2424](https://github.com/ACINQ/eclair/issues/2424),
   [Breez Lightning Rod](https://medium.com/breez-technology/introducing-lightning-rod-2e0a40d3e44a)
 - bLIP-51 liquidity ads (budget provisioning); BOLTs 2/3/5 (all reused machinery)
+- Fair-exchange impossibility (the bound §12.5 rests on): Henning Pagnia and Felix
+  Gärtner, *On the Impossibility of Fair Exchange without a Trusted Third Party*,
+  Darmstadt University of Technology TUD-BS-1999-02, 1999; Shimon Even, Oded Goldreich and
+  Abraham Lempel, *A Randomized Protocol for Signing Contracts*, CACM 28(6), 1985
 
 FFOR's delta over fast-forwards as previously discussed: the complete delegation and
 settlement protocol around the core update (packages, tower gating of preimage release,

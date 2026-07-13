@@ -18,7 +18,7 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.3): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
 | [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded) |
 | [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
 
@@ -42,10 +42,34 @@ regtest bitcoind:
 - **M6** — liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
   splice-on-return, and a 21-case crash matrix covering every protocol arrow.
 
+## Can it be trustless with no server at all?
+
+Mostly, and the spec now says exactly how far.
+
+The tower was doing two jobs. **Watching** for a revoked broadcast is removable outright:
+open the channel with a `to_self_delay` on `S` longer than the offline window, and `S`'s
+only revocable state is locked behind a CSV that outlives `R`'s absence, so `R` penalizes
+on return with nobody watching (§5.1). **Mediating** the settlement is removable too, via
+**Variant D** (§9.5): commit the whole voucher book at setup in one ordinary channel
+update, and `S` sends no message to anyone for the entire epoch. Payments settle by
+preimage revelation alone, and because BOLT 2 forces `S` to publish that preimage upstream
+to take the money, the payer necessarily ends up holding the key to `R`'s voucher. `R`'s
+recourse becomes a 1-of-N availability assumption over `{S, the payers, any mailbox}`
+rather than trust in one chosen agent.
+
+What is **not** removable is the last increment: an `S` that settles and withholds, whose
+payer is also unreachable, still costs `R` that voucher. §12.5 proves this is a bound
+rather than a gap. Fair exchange without a trusted third party is impossible, `R` is
+offline by construction so its half of the swap must be pre-played, and pre-playing it
+moves the exposure onto `S` instead of eliminating it. Script cannot force a message to be
+sent, cannot prove a negative, and cannot force `S` on-chain; covenants and taproot do not
+change any of that.
+
 ## Status
 
 Draft. Wire details reflect what the prototype actually implements; message type and
-feature bit numbers are provisional pending bLIP assignment.
+feature bit numbers are provisional pending bLIP assignment. **Variant D and §5.1 are
+specified but not yet prototyped** (M8, §15.1).
 
 ## Prior art
 
