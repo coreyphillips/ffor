@@ -29,17 +29,31 @@ exposures, and they are different in kind:
 2. **Hash reuse (§13.7).** A preimage is a bearer token. Once the peer has it, it can
    redeem the *same* payment hash against as many payers as it can find, crediting the
    recipient once and pocketing the rest. This is **unbounded** (not capped by the epoch
-   budget), **evidence-free** (nothing the recipient or a tower ever observes distinguishes
-   one payment on a hash from two), and **closed by no variant**: not by the tower, not by
-   Variant D. It is an **open problem, not a theorem.**
+   budget) and **evidence-free** (nothing the recipient or a tower ever observes
+   distinguishes one payment on a hash from two). No variant's cryptography closes it, and
+   **PTLCs do not close it either** (§13.5 explains why; v0.8 claimed they would, and that
+   was wrong).
 
-The only mitigation for (2) today is to keep invoice distribution away from the settlement
-peer: the recipient hands out its own invoices, one per payer, before going offline. That
-works, and v0.9 fixes the settlement-ordering rule that previously made it unusable. But it
-requires the recipient to **know its payers in advance**. An `R` that wants to receive from
-an arbitrary unknown payer with no server has no mitigation available today and is trusting
-its peer not to reuse a hash. BOLT 12 or PTLC payer-and-amount binding closes this properly;
-until then, it bounds what FFOR should be deployed for.
+**But (2) is closed by one line of deployment policy.** A second payer only ever appears if
+somebody hands them an invoice signed by the recipient, and the settlement peer cannot forge
+that signature. The peer gets those invoices from exactly one optional message,
+`ff_invoices`, which it does not otherwise need: it matches payments by hash, not by
+invoice. **Don't send it, and the attack is unconstructable.** Distribution then falls to the
+recipient itself, or to any party that isn't the peer.
+
+So:
+
+| Who hands out the invoices | Theft vector | Needs a server | Handles unknown payers |
+|---|---|---|---|
+| The recipient, before going offline | **none** | no | no |
+| A tower / mailbox the recipient chooses | **none** | yes | yes |
+| **The settlement peer** (`ff_invoices` sent) | **unbounded** | no | yes |
+
+Pick either of the first two and FFOR has no theft vector at all. The honest residual is
+that **"no server, arbitrary unknown payers, no theft" is unreachable**. Someone online has
+to hand out single-use invoices and remember that they did, and that is a stateful
+always-online role by definition. If you're already running a tower to close withholding,
+it's the same box, so closing this costs you nothing.
 
 ## Contents
 
@@ -71,8 +85,9 @@ regtest bitcoind:
 
 ## Can it be trustless with no server at all?
 
-**For the withholding problem: yes, and the spec says exactly how far. For hash reuse: no,
-and that is the honest limit of the result.**
+**Yes, if you know your payers in advance. No, if you want to receive from anyone.** Those
+are two different limits, they come from two different arguments, and v0.8 ran them
+together.
 
 The tower was doing two jobs. **Watching** for a revoked broadcast is removable outright:
 open the channel with a `to_self_delay` on `S` longer than the offline window, and `S`'s
@@ -93,18 +108,21 @@ and pre-playing it moves the exposure onto `S` instead of eliminating it. Script
 force a message to be sent, cannot prove a negative, and cannot force `S` on-chain;
 covenants and taproot do not change any of that.
 
-**But §5.1 and §9.5 do not touch §13.7.** Hash reuse is a different problem, it is
-unbounded where withholding is bounded, and its only mitigation is to take invoice
-distribution away from `S`, which, for an `R` that wants to receive from an *arbitrary,
-unknown* payer, means putting an always-online party back in the picture to serve invoices
-and enforce single use. **The intersection of "no server" and "receive from anyone" is not
-covered by this spec.** It is covered by an `R` that knows its payers in advance, and it
-will be covered generally by BOLT 12 / PTLC binding. Do not read the server-free result as
-broader than it is.
+**§5.1 and §9.5 remove the *mediator*. They do not remove the *distributor*.** Hash reuse is
+a separate problem, and it is closed by policy rather than by cryptography: don't let `S`
+hold your invoices (§7.3.0). If `R` knows its payers in advance it distributes them itself,
+and then FFOR is server-free **and** theft-free. If `R` wants to receive from anyone, some
+online party has to hand out single-use invoices, and **no cryptography removes that role**:
+not PTLCs, not BOLT 12, not covenants (§13.5, §12.5).
+
+So the design space has two always-online roles, not one, and v0.8 only noticed the first.
+The good news is that the second is cheap: it holds no funds and no keys, just an invoice
+list and a record of what it has served, and if you're already running a tower it *is* the
+tower.
 
 (This is also why v0.9 downgrades the hash-chained voucher construction of §9.5.4 from
 RECOMMENDED to OPTIONAL: it only works if `S` serves the invoices, so it is structurally
-incompatible with the one mitigation §13.7 has.)
+incompatible with the fix.)
 
 ## Status
 
