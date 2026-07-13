@@ -30,7 +30,7 @@
   holds. §12.5 states the bound the two cannot cross, and why no script, covenant or
   taproot construction crosses it either. §5.1's `to_self_delay` direction is confirmed
   against BOLT 2. Variant D itself is unprototyped (M8, §15.1)
-- Author: Corey Phillips (with Claude)
+- Author: Corey Phillips
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
 
