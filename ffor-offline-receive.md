@@ -1132,13 +1132,20 @@ either, whose voucher book has exactly one output per hash. It is the one theft 
 this spec that no variant's cryptography addresses, and unlike Variant A's withholding it
 is **not bounded by the epoch budget**: it is bounded only by what payers actually send.
 
-Confirmed against the reference implementation (beignet `feat/ffor`), which is faithful to
-this spec and inherits the gap from it rather than introducing it: the settlement pipeline
-is `seq`-indexed throughout (`paymentHashes[seq − 1]`), the tower's `ff_release` is keyed
-and idempotent on `seq` and verifies only `payment_hash == H_seq`, and no settled-hash set
-exists on either side. Once `S` holds `t_k`, fulfilling a second upstream HTLC carrying
-`H_k` is an ordinary `update_fulfill_htlc` that re-enters neither the FFOR settlement path
-nor the tower. There is no gate to fail; there is simply no gate.
+Characterized against the reference implementation (beignet `feat/ffor`) in a two-test
+gate (M8.8, §15.1), which sharpened the finding. An **honest** `S` *does* refuse the
+duplicate: on a second payment for a consumed hash it fails upstream with
+`duplicate delegated payment for consumed hash H_k`. Single-use is implemented. But that
+refusal is **self-imposed by `S` and unverifiable by anyone else**. The tower's gate is
+keyed and idempotent on `seq`, and `seq` was consumed by the first settlement, so a second
+settlement on `H_k` never reaches `T`; `R` is offline and no package, tower record, or
+chain artefact is produced. A malicious `S` that simply omits its own guard fulfils the
+second payer with the token `t_k` it already holds, via an ordinary `update_fulfill_htlc`,
+and `R` is credited exactly once with no evidence it could ever act on. The test confirms
+this end-to-end: same `S` node identity, a second payer, no tower interaction, `R`'s epoch
+state byte-identical before and after the theft. The gap is therefore not a missing check
+in the implementation but the **absence of any place to put an enforceable one**: nothing
+`R` or `T` observes distinguishes one payment on `H_k` from two.
 
 §13.1's "`S` fails surplus parts carrying an already-settled hash" and §12.4's "mitigated
 by single-use hashes" are both MUSTs aimed squarely at the party that would be cheating.
@@ -1269,9 +1276,19 @@ transport.
 8. **M8.7: Vanished `R`.** No reconciliation; `S` force-closes after `T_exp` and sweeps
    every unclaimed voucher via HTLC-timeout. **Gate:** `S` whole (no escape machinery
    present in the build); `R`'s `to_remote` claimable whenever it returns.
-9. **M8.8: Hash reuse (§13.7), expected to FAIL.** Two payers pay the same `H_k`. Record
-   the loss. This is a **characterization test**, not a gate: it pins the open problem so
-   a future BOLT 12 / PTLC fix has a regression target.
+9. **M8.8: Hash reuse (§13.7), characterization.** Two tests, both **passing today**, that
+   pin the open problem rather than gate against it. (a) An honest `S` refuses a second
+   payment on a consumed hash (`duplicate delegated payment for consumed hash`), proving
+   single-use *is* implemented. (b) A malicious `S` (same node identity, its own duplicate
+   guard omitted) claims a second payer on `H_k` with the token alone: the payment
+   completes, the tower is never consulted, and `R`'s epoch state is byte-identical before
+   and after, proving the theft is currently possible and evidence-free. Test (b) is
+   written to **invert** (start failing) the day BOLT 12 / PTLC payer-and-amount binding
+   (§13.5) makes the second settlement unconstructable, giving that future work a
+   regression target. Unlike M8.0 to M8.7 this milestone is **not blocked on Variant D**:
+   it characterizes the existing Variant B implementation and is already implemented
+   (`tests/lightning/ffor-hash-reuse.test.ts`, in-memory, no bitcoind, green as of this
+   writing).
 
 ---
 
