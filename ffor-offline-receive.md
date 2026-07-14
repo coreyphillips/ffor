@@ -21,19 +21,20 @@
   so unusable (payers pay out of order and get failed; one non-payer stalls the epoch).
   §7.3 adds an **unordered profile**, `ff_init.settlement_order`, which decouples `seq`
   from the hash index and costs one redundant evidence channel (§7.2)
-- **Also new in v0.9: §13.7 is closed, and not by the thing v0.8 expected.** v0.8 filed
-  hash reuse as an open problem awaiting BOLT 12 or PTLCs. **PTLCs do not close it** (§13.5,
-  a full reversal: any scheme where `S` can settle a payment to `R`'s offer is a scheme
-  where `S` can settle *arbitrarily many*, because delegating settlement authority is
-  delegating repeat-redemption authority, and adaptor composition leaks `T`'s share after
-  the first settlement). It does not need them. The attack requires `S` to hold `R`-signed
-  invoices, `S` gets those from exactly one message it does not need, and **`ff_invoices`
-  (§7.3.0) is now OPTIONAL and SHOULD NOT be sent**. With it withheld, the second payment
-  is unconstructable, because `S` cannot forge `R`'s signature. The residual is no longer a
-  theft vector but a **role**: distributing single-use invoices to *unknown* payers is an
-  always-online, stateful job that no cryptography removes (§12.5). There are two
-  always-online roles in this design space (mediator and distributor); §5.1 and §9.5 remove
-  the first, nothing removes the second, and if `R` runs a tower anyway the second is free
+- **Also new in v0.9: §13.7 is closed, and more cheaply than by cryptography.** v0.8 filed
+  hash reuse as an open problem awaiting BOLT 12 or PTLCs. It does not need them: the attack
+  requires `S` to hold `R`-signed invoices, `S` gets those from exactly one message it does
+  not need, and **`ff_invoices` (§7.3.0) is now OPTIONAL and SHOULD NOT be sent**. With it
+  withheld, the second payment is unconstructable, because `S` cannot forge `R`'s signature.
+  PTLCs *can* also close reuse, but only in one configuration (an always-online tower plus a
+  payer-side change to seal the payment tweak to that tower, on PTLC channels that do not
+  yet exist), so they are a future option for one case rather than the fix (§13.5, corrected
+  after two adversarial reviews from an over-strong "PTLCs cannot close it" claim in an
+  earlier v0.9 draft). The residual is not a theft vector but a **role**: distributing
+  single-use invoices to *unknown* payers is an always-online, stateful job that no
+  cryptography removes (§12.5). There are two always-online roles in this design space
+  (mediator and distributor); §5.1 and §9.5 remove the first, nothing removes the second,
+  and if `R` runs a tower anyway the second is free
 - **From v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
@@ -83,8 +84,8 @@ and the configuration is a **distribution choice, not a variant choice**:
   first: unbounded, evidence-free, and closed by no variant's cryptography (§13.7).
   **But this requires `S` to hold `R`-signed invoices**, which it obtains from exactly one
   optional message. `S` does not need that message. **Do not send `ff_invoices` and the
-  attack cannot be constructed** (§7.3.0). PTLCs do **not** close it; §13.5 explains why,
-  reversing a claim made in v0.8.
+  attack cannot be constructed** (§7.3.0). PTLCs close it only in one costly configuration
+  (online tower + a payer-side change, §13.5), not as the fix v0.8 imagined.
 
 **FFOR has no theft vector when the invoices are distributed by `R` itself, or by any party
 other than `S`** (§7.3.1). It has an unbounded one when `S` serves them. Read §7.3.1 and
@@ -174,7 +175,7 @@ epochs.
 | `S` broadcasts stale state | penalized (state revoked by first settlement; evidence reaches payer) | penalized (tower holds revocation from package 1) | penalized (pre-epoch state revoked by the setup update) | penalized |
 | `S` settles upstream but withholds the credit | **possible**; produces automatic cryptographic fraud proof (§12.2) | **impossible** without `S`+`T` collusion | possible, but `R`'s claim needs **only the preimage**, which the payer necessarily holds (§9.5) | impossible without collusion; collusion also cryptographically evidenced |
 | Bound on that exposure | **what payers send** (invoices are amountless, §12.1) | n/a | `budget_msat` (invoices are fixed-amount) | n/a |
-| **`S` redeems the same `H_k` twice (§13.7)** | **possible iff `S` holds `R`-signed invoices** | **possible iff `S` holds `R`-signed invoices** | **possible iff `S` holds `R`-signed invoices** | **possible iff `S` holds `R`-signed invoices** (PTLCs do **not** close this, §13.5) |
+| **`S` redeems the same `H_k` twice (§13.7)** | **possible iff `S` holds `R`-signed invoices** | **possible iff `S` holds `R`-signed invoices** | **possible iff `S` holds `R`-signed invoices** | closable by cryptography, but only with an online `T` + a payer change (§13.5); otherwise same as the others |
 | Bound on *that* exposure | **none** (what payers send) | **none** | **none** | **none** |
 | Closed by **not** sending `ff_invoices` (§7.3) | yes | yes | yes | yes |
 | `R` fabricates credit | impossible (`S` signed every voucher) | impossible | impossible while `S` generates the preimages; **possible** if `R`'s tower holds them (§9.5.2) | impossible |
@@ -199,11 +200,12 @@ always-online third party. §12.5 gives the argument and shows why no script, co
 taproot construction changes it. This is the bound the design is allowed to hit.
 
 The row **`S` redeems the same `H_k` twice** is not a theorem, and it is **not a property
-of any variant**. It is bounded by neither `budget_msat` nor anything else, no variant's
-cryptography closes it (not Variant B, whose tower is never consulted for the second
-redemption; not Variant D, whose voucher book mints one output per hash however many times
-that hash is paid; and **not Variant C**, see §13.5, which reverses what v0.8 claimed), and
-it is therefore not something you fix by picking a column.
+of any variant** in the deployments this spec ships. No shipping variant's cryptography
+closes it: not Variant B, whose tower is never consulted for the second redemption; not
+Variant D, whose voucher book mints one output per hash however many times that hash is
+paid. Variant C (PTLC) *can* close it, but only with an always-online tower plus a change to
+payers, on channels that do not yet exist (§13.5); that is a genuine future option for the
+arbitrary-payer case, not something you get by picking a column today.
 
 It is closed instead by a **capability**, and the capability is one message. A payer will
 only pay `H_k` if someone hands them an invoice **signed by `R`**, and `S` cannot forge
@@ -1267,7 +1269,9 @@ Stated plainly:
    enabled **precisely and only** when `S` is the party serving `R`'s invoices, and it
    produces no evidence `R` can ever act on. It is therefore not a limitation of FFOR so
    much as a limitation of one configuration of it: send `ff_invoices` and it is your worst
-   exposure; withhold it (§7.3.0) and it does not exist. PTLCs do not help (§13.5).
+   exposure; withhold it (§7.3.0) and it does not exist. PTLCs can also close it, but only
+   with an online tower and a payer-side change (§13.5), so withholding the message is the
+   cheaper fix by far.
 3. `payment_secret` is unenforced, and single-use hashes are an **assumption the protocol
    does not enforce** (§13.7).
 4. Amount attestation is amountless-grade under the default A/B invoice construction
@@ -1351,12 +1355,14 @@ That sentence is true of **withholding**, which is what this section is about. I
 nothing about **hash reuse**, which is a different problem with a different resolution, and
 the two must not be conflated.
 
-§5.1 and §9.5 remove the tower from the *withholding* problem. §13.7 is closed separately,
-and **not by cryptography**: PTLCs cannot close it (§13.5), BOLT 12 cannot close it while
-`R` is offline (§13.2), and no covenant or taproot construction touches it either, for the
-very obstructions enumerated above. It is closed by **capability**: `S` cannot originate a
-duplicate payment if it never holds an `R`-signed invoice, so do not send `ff_invoices`
-(§7.3.0).
+§5.1 and §9.5 remove the tower from the *withholding* problem. §13.7 is closed separately
+and more cheaply than by cryptography. It is closed by **capability**: `S` cannot originate
+a duplicate payment if it never holds an `R`-signed invoice, so do not send `ff_invoices`
+(§7.3.0). Cryptography *can* also close it: a payer-tweaked PTLC gated by an online tower
+does (§13.5), but only at the price of an always-online party and a change to payers, and
+BOLT 12 alone cannot, since its payer-binding needs `R` to sign against an `invoice_request`
+and `R` is offline. What no construction removes is the online party itself: the reuse gate,
+like the withholding gate, cannot be held by script, only relocated onto a live party.
 
 That leaves a second bound, narrower than this section's but of the same character:
 
@@ -1417,10 +1423,11 @@ packages (which state `htlc_amount_msat`) partially repair this — the payer ca
 `S`'s package signature as an amount attestation.
 
 **Use pre-signed fixed-amount invoices** (§7.3) to repair it properly. v0.8 said "PTLCs
-repair it properly"; that is now doubtful, since PTLC amount-binding rides on payer tweaks
-and §13.5 shows payer tweaks are incompatible with delegated settlement. Fixed-amount
-invoices work today, in every variant, and additionally restore `budget_msat` as a real
-bound on withholding exposure (§12.1).
+repair it properly." PTLC amount-binding rides on the payer tweak, which does work under
+delegated settlement but only in §13.5's full configuration (online tower, payer change,
+PTLC channels). Fixed-amount invoices work today, in every variant, with none of that, and
+additionally restore `budget_msat` as a real bound on withholding exposure (§12.1). Prefer
+them.
 
 ### 13.4 Simple-taproot channels
 MuSig2 funding does not block fast-forwards — `S` contributes its partial signature on
@@ -1431,57 +1438,104 @@ verification-nonce derivation (as beignet already implements for reestablish:
 tower's checklist (partial-sig verification) and the penalty path (taproot revocation
 key-path tweaks). Deferred to a v2 appendix; v1 is ECDSA-anchor only.
 
-### 13.5 PTLC upgrade (Variant C), and why it does **not** close §13.7
+### 13.5 PTLC upgrade (Variant C): what it closes, at what price
 
-> **Correction (v0.9).** v0.8 claimed that PTLCs close the §13.7 reuse vector "by making
-> each payment's secret distinct even on a reused offer," and §13.7 listed them as the
-> proper fix. **That is wrong**, and the error mattered: it made §13.7 look like a
-> scheduling problem awaiting a known upgrade, when it is a *capability* problem solvable
-> today by not sending one message (§7.3.0). The argument below is the correction.
+> **Correction history.** v0.8 said PTLCs close the §13.7 reuse vector "by making each
+> payment's secret distinct even on a reused offer," and listed them as the proper fix.
+> An earlier v0.9 draft over-corrected to the opposite claim, that PTLCs *cannot* close it.
+> Two independent adversarial reviews (see the commit trail) found that second claim also
+> wrong, and traced the error. The accurate statement is between the two, and it is below.
+> The load-bearing point is unchanged either way: **FFOR closes reuse more cheaply than any
+> PTLC construction, by not sending one message (§7.3.0).** What changes is that PTLCs are
+> credited with the fix they genuinely provide, and its real price is named.
 
-**What Variant C still buys.** Replace hashes with points and compose: the upstream payment
-point requires adaptor shares from both `S` and `T`, so `S`'s completed upstream adaptor
-signature *is* the release event, cryptographically inseparable from the package
-commitment. Withholding stops being a trust question even against `S`+`T` collusion, since
-the collusion itself yields a publishable adaptor transcript. That is a real gain and
-Variant C is still worth building. All FFOR structure (vouchers, escapes, reconciliation)
-carries over unchanged; only §9's release mechanics upgrade. This aligns with the
-PTLC-based async-payments direction Corallo has advocated
-([Optech topic](https://bitcoinops.org/en/topics/async-payments/)).
+**What Variant C still buys, unconditionally.** Replace hashes with points and compose: the
+upstream payment point requires adaptor shares from both `S` and `T`, so `S`'s completed
+upstream adaptor signature *is* the release event, cryptographically inseparable from the
+package commitment. Withholding stops being a trust question even against `S`+`T`
+collusion, since the collusion itself yields a publishable adaptor transcript. That is a
+real gain and Variant C is worth building for it alone. All FFOR structure (vouchers,
+escapes, reconciliation) carries over unchanged; only §9's release mechanics upgrade.
 
-**Why it does not close reuse.** To settle on `R`'s behalf, `S` must reveal `dlog(P')` for
-its incoming payment point `P'`. That is not optional: it is how `S` claims upstream. Trace
-the consequences.
+**PTLCs also *can* close reuse, but only in one configuration, and it is not a cheap one.**
+The mechanism is the payer tweak, and the algebra is worth stating because the intuitive
+argument (which the v0.9 draft made) gets it backwards.
 
-- **Reusable offer with a payer tweak** (the property PTLCs are prized for: payer picks
-  random `r`, pays `P' = P + rG`, secret is `x + r`). For `S` to settle it must know both
-  `x` and `r`, so `S` holds the **master scalar** `x`. It can then compute `x + r'` for
-  *any* tweak and settle **unlimited** payments to that offer, alone, forever. Reuse gets
-  strictly worse. And if `r` is withheld from `S` (carried only in the final onion, which
-  `S` cannot decrypt), then `S` cannot settle at all, and neither can `T`, which knows `x`
-  but not `r`. **Payer-tweaked static offers are incompatible with delegated settlement.**
-  The one PTLC property that would help is the one FFOR cannot use.
-- **One-time points** (`R` pre-commits `K` independent `P_k`, no tweak). Isomorphic to `K`
-  independent hashes. Two payers handed the same invoice both pay `P_k`; `S` settles both
-  with `x_k`; one voucher is minted. **Identical theft.**
-- **Variant C's adaptor composition** (`P' = P_S + P_T`, `S` needs `T`'s share). The value
-  `S` publishes upstream is a **linear combination**, `σ = s_S + s_T`. After the first
-  settlement `S` knows `σ` and its own `s_S`, so it extracts `s_T`. `T`'s gate holds
-  exactly once; thereafter `S` is autonomous. **Same failure as the preimage.**
+Setup: `R`'s offer commits to a master point `P = xG`. A payer picks a fresh random scalar
+`r`, pays a point `P' = P + rG`, and the scalar that claims it upstream is `σ = x + r`.
+Everyone on the route can compute the *point* `rG = P' − P`, but recovering the *scalar* `r`
+from it is a discrete log. That single asymmetry is the whole game:
 
-The generalization, which is worth stating because it forecloses the whole family: **any
-scheme in which `S` can settle a payment to `R`'s offer is a scheme in which `S` can settle
-*arbitrarily many* payments to `R`'s offer.** Delegating settlement authority *is*
-delegating repeat-redemption authority. This is a property of delegation, not of hash
-functions, and no signature scheme, adaptor construction, or covenant relocates it, for
-the same reason §12.5 gives: `S`'s redemption happens in a channel `R` and `T` cannot
-observe, and script cannot force a message to be sent.
+- `S` needs `σ` (a scalar) to claim, but it needs it **only once, for this payment.** It
+  does **not** need to hold `x`. If an online party that holds `x` is given this payment's
+  `r`, it computes `σ = x + r` and hands `S` only `σ`.
+- From `σ_1 = x + r_1`, `S` cannot reach `σ_2 = x + r_2`: the gap is the scalar
+  `r_2 − r_1`, and `S` holds only its point `(r_2 − r_1)G`. **So `S` must return to the
+  gatekeeper for every settlement**, and the gatekeeper conditions each release on a fresh
+  credit to `R`. Reuse is closed, not by making the token unforgeable, but by making the
+  released scalar **payment-bound instead of invoice-bound.**
 
-**What closes it is therefore not cryptography but capability**: `S` cannot induce a
-payment it cannot produce an `R`-signed invoice for. Do not send `ff_invoices` (§7.3.0).
-Note that §13.3's "PTLCs repair amount binding properly" is also weakened by the above: no
-payer tweak means no per-payment uniqueness, so use pre-signed **fixed-amount** invoices
-(§7.3) for amount binding rather than waiting on PTLCs.
+This is exactly Corallo's 2021 proposal for the same lnurl-reuse problem, and it is what
+the v0.9 draft's "for `S` to settle it must hold the master scalar `x`" got wrong: settling
+one payment (with the gatekeeper's live help) does **not** confer the ability to settle a
+second. The two families that *do* fail, and why, sharpen the point rather than contradict
+it:
+
+- **One-time points** (`R` pre-commits `K` independent `P_k`, no payer tweak) are
+  isomorphic to `K` independent hashes: two payers handed the same `P_k` both pay it, `S`
+  settles both with `x_k`, one voucher is minted. This fails **precisely because it deletes
+  the payer tweak**, since the per-payment randomness is the ingredient that saves the case
+  above.
+- **A tower share that is constant across payments** (`P' = P_S + P_T` with `P_T` fixed)
+  fails: `S` publishes `σ = s_S + s_T`, subtracts its own `s_S`, and keeps `s_T` forever.
+  This is a defect of choosing a *static* share, not of adaptor composition. Refresh the
+  share per payment (`T` releases `s_T + r` against `P' = P_S + P_T + rG`) and the
+  extraction yields `s_T + r_1`, which is useless for payment 2. Note the FFOR sketch of
+  Variant C as literally `P_S + P_T` **is** the static-share case and **is** vulnerable as
+  written; the fix is the payer-tweaked share.
+
+**So the corrected generalization** is not "delegating settlement delegates
+repeat-redemption." It is narrower and is the same invariant §12.5 states for withholding:
+
+> Any scheme in which `S` can settle **without a fresh, per-payment input from an
+> online party** is one in which `S` can settle arbitrarily many. Cryptography can move the
+> gate off the reusable token; it cannot move it off an online party.
+
+**The no-tower case is therefore a clean theorem, and it is the defensible core of the
+original intuition.** If `S` is the only online party with settlement authority, then to
+settle a payment locked to `P + rG` it must obtain `σ = x + r` either (i) by computing it,
+which needs `x` plus this payment's `r`, and obtaining arbitrary payments' `r` means
+holding `R`'s onion-decryption capability, so `S` holds `x` and decrypts for `R` and can
+settle **every** payment to `R` at its discretion, unbounded; or (ii) from another online
+party, contradicting "`S` is the only online party." **No PTLC, adaptor, or covenant
+construction escapes this.** The payer tweak buys a lever; it does not buy a hand to pull
+it. That hand is an online gatekeeper, which is §12.5's mediator and §13.7's distributor
+under a third name.
+
+**What the closing configuration costs, stated plainly.** To close reuse with PTLCs you
+need, all at once: (1) **PTLC channels**, which do not exist in production as of this
+writing; (2) an **always-online `T`** chosen by `R`, holding `x` (or a share of it) and
+gating every settlement, strictly more work than Variant B's tower, not less; (3) a
+**change to payers**, who must seal a copy of the tweak `r` to `T`'s key (the standard PTLC
+tweak reaches only `R`'s final onion payload, which neither `S` nor `T` can decrypt; the
+one sound delivery is a payer-authored TLV encrypting `r` to `T`, advertised through `R`'s
+BOLT 12 offer / blinded path). (3) directly contradicts FFOR's "no changes to payers"
+premise, and a non-upgraded payer cannot pay such an offer safely. There is also a
+proof-of-payment cost: making the claim scalar payer-supplied is in tension with `R` being
+the unique holder of the payment secret (this is a known async-payments trade, not
+FFOR-specific).
+
+**Bottom line.** PTLCs close reuse only as *"Variant B with teeth"*: an online `T` releasing
+a per-payment scalar share bound to a payer-supplied tweak, on future PTLC channels, at the
+price of a payer change. FFOR already closes the same vector today, for free, by not sending
+`ff_invoices` (§7.3.0). The PTLC construction's real value is narrower and worth recording:
+it is the only known way to keep reuse closed **while serving arbitrary unknown payers
+through `T`**, i.e. it converts §13.7's *distributor* obligation into a cryptographic gate.
+That is a genuine future option for the arbitrary-payer case, not a reason to wait.
+
+On amount binding (§13.3): the payer-tweak construction restores per-payment uniqueness
+only in the full configuration above; **fixed-amount pre-signed invoices repair amount
+attestation today, in any variant** (§7.3), and should be preferred over waiting on PTLCs.
 
 ### 13.6 Multiple settlement peers
 One epoch per channel; `R` MAY run concurrent epochs on different channels with
@@ -1491,12 +1545,14 @@ aggregation and payer-side choice are out of scope.
 ### 13.7 Invoice serving and hash reuse (**closed by §7.3.0, if you let it be**)
 
 > **Status change (v0.9).** v0.8 filed this as an open problem awaiting BOLT 12 or PTLCs.
-> That framing was wrong twice over. PTLCs do **not** close it (§13.5), and it does **not**
-> need them: the attack requires `S` to hold `R`-signed invoices, `S` obtains those from
-> exactly one message, and `S` does not need that message. **Do not send `ff_invoices` and
-> the attack is unconstructable** (§7.3.0). What remains open is only the *ergonomics* of
-> distribution, not the security. This section is kept in §13 because the trap is easy to
-> walk back into and because §9.5.4 and §13.2 both walk into it.
+> That framing was wrong: the vector does not need them. The attack requires `S` to hold
+> `R`-signed invoices, `S` obtains those from exactly one message, and `S` does not need
+> that message. **Do not send `ff_invoices` and the attack is unconstructable** (§7.3.0).
+> PTLCs *can* close it, but only in the full online-tower-plus-payer-change configuration of
+> §13.5, so they are a future option for the arbitrary-payer case rather than the fix. What
+> remains open is only the *ergonomics* of distribution, not the security. This section is
+> kept in §13 because the trap is easy to walk back into and because §9.5.4 and §13.2 both
+> walk into it.
 
 A preimage is a **bearer token**. Once `S` holds `t_k`, it can fulfil *any* upstream HTLC
 carrying `H_k`, not merely the first. If a second payer pays an HTLC with
@@ -1560,13 +1616,18 @@ and neither is enforceable by anyone else. Single-use is enforceable only by who
   **MUST NOT** place `S` in that role. Note that **§9.5.4's hash chain requires this
   configuration** (only `S` knows the current level), which is why v0.9 downgrades the
   chain to OPTIONAL.
-- **BOLT 12 / PTLC binding does *not* close it.** v0.8 listed this as the proper fix. It is
-  not: PTLCs cannot give per-payment secret uniqueness under delegated settlement (§13.5),
-  and BOLT 12's payer-binding requires `R` to sign in response to an `invoice_request`,
-  which an offline `R` cannot do. The one cryptographic direction that *would* work is `R`
-  delegating **invoice-signing authority** to `T`, letting `T` mint a uniquely-bound
-  invoice per payer; that is a real design, and it is still a distribution fix with an
-  online party, not a way to avoid one.
+- **PTLC binding closes it only in one costly configuration, and BOLT 12 alone does not.**
+  v0.8 listed this as *the* proper fix; it is one fix, for one case, with real costs.
+  Payer-tweaked PTLCs gated by an online `T` do give per-payment secret freshness that `S`
+  cannot reuse (§13.5), which closes reuse **even for arbitrary unknown payers**, the one
+  thing bullet 1 cannot do. But it needs PTLC channels (not yet deployed), an always-online
+  `T`, and a **change to payers** (they must seal the tweak to `T`), and it trades away
+  proof-of-payment. BOLT 12 on its own does not close it: its payer-binding requires `R` to
+  sign against an `invoice_request`, which an offline `R` cannot do; a static invoice is
+  reusable. A parallel cryptographic direction is `R` delegating **invoice-signing
+  authority** to `T`, letting `T` mint a uniquely-bound invoice per payer. All of these are
+  distribution fixes with an online party (they relocate the gate onto `T`), not ways to
+  avoid one.
 
 **What is left open, stated precisely.** Not the security, which is closed by not sending
 one message. What is left open is that the **server-free** configuration (bullet 1)

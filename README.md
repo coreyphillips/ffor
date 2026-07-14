@@ -30,9 +30,10 @@ exposures, and they are different in kind:
    redeem the *same* payment hash against as many payers as it can find, crediting the
    recipient once and pocketing the rest. This is **unbounded** (not capped by the epoch
    budget) and **evidence-free** (nothing the recipient or a tower ever observes
-   distinguishes one payment on a hash from two). No variant's cryptography closes it, and
-   **PTLCs do not close it either** (§13.5 explains why; v0.8 claimed they would, and that
-   was wrong).
+   distinguishes one payment on a hash from two). No shipping variant's cryptography closes
+   it. **PTLCs can close it, but only with an always-online tower plus a change to payers,
+   on channels that don't yet exist** (§13.5), so they're a future option for one case, not
+   the fix. v0.8 claimed PTLCs were the fix outright; that was wrong.
 
 **But (2) is closed by one line of deployment policy.** A second payer only ever appears if
 somebody hands them an invoice signed by the recipient, and the settlement peer cannot forge
@@ -113,7 +114,8 @@ a separate problem, and it is closed by policy rather than by cryptography: don'
 hold your invoices (§7.3.0). If `R` knows its payers in advance it distributes them itself,
 and then FFOR is server-free **and** theft-free. If `R` wants to receive from anyone, some
 online party has to hand out single-use invoices, and **no cryptography removes that role**:
-not PTLCs, not BOLT 12, not covenants (§13.5, §12.5).
+PTLCs can move the gate onto that party (§13.5) but cannot delete it, and BOLT 12 and
+covenants do not touch it (§13.5, §12.5).
 
 So the design space has two always-online roles, not one, and v0.8 only noticed the first.
 The good news is that the second is cheap: it holds no funds and no keys, just an invoice
