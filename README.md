@@ -18,16 +18,16 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
-| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded) |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8.1): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
+| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded). **`C_2`/`C_3` carry known errata, see the note at the head of the file** |
 | [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
 
 ## Reference implementation
 
 Prototyped in [beignet](https://github.com/coreyphillips/beignet) on the
-[`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor) branch. **All
-six prototype milestones are complete** and every gate is validated against live
-regtest bitcoind:
+[`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor) branch. **M1
+through M7 are complete** and every on-chain gate is validated against live regtest
+bitcoind:
 
 - **M1/M2** — epoch setup, variant-A settlement, reconciliation: a payer's payment
   completes end-to-end while the recipient is offline; the spec's test vectors are
@@ -41,6 +41,12 @@ regtest bitcoind:
   confirmed exact on-chain.
 - **M6** — liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
   splice-on-return, and a 21-case crash matrix covering every protocol arrow.
+- **M7**, hardening the tower into a service: durable store and restart contract,
+  BOLT-8 tower transport (spec Appendix C), role separation and node-embedded
+  breach-watch, and gossip-based tower discovery.
+
+Plus **M8.8**, a two-test characterization of the §13.7 hash-reuse vector, which is
+implemented and green but gates nothing.
 
 ## Can it be trustless with no server at all?
 
@@ -67,9 +73,14 @@ change any of that.
 
 ## Status
 
-Draft. Wire details reflect what the prototype actually implements; message type and
-feature bit numbers are provisional pending bLIP assignment. **Variant D and §5.1 are
-specified but not yet prototyped** (M8, §15.1).
+Draft v0.8.1, an errata release over v0.8. Wire details reflect what the prototype
+actually implements; message type and feature bit numbers are provisional pending bLIP
+assignment. **Variant D and §5.1 are specified but not yet prototyped** (M8, §15.2).
+
+§17 lists what changed and what it breaks. The one item that reaches published
+artefacts: §8's millisatoshi rounding rule was the inverse of BOLT 3's, so `C_2` and
+`C_3` in the test vectors carry a `to_remote` one satoshi high and need regenerating
+against a corrected commitment builder.
 
 ## Prior art
 
