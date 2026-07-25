@@ -503,7 +503,7 @@ for (let i = 0; i <= 3; i++) {
 	const keys = deriveCommitmentKeys(sBasepoints, rBasepoints, rPoint, false);
 	assert(
 		keys.remotePaymentPubkey.equals(sBasepoints.paymentBasepoint),
-		`C_${i}: static_remotekey — to_remote key is S's payment basepoint`
+		`C_${i}: static_remotekey, to_remote key is S's payment basepoint`
 	);
 
 	// Reconstruct each voucher's HTLC-success transaction exactly as
@@ -651,7 +651,7 @@ w('# FFOR Appendix A: canonical `C_i^R` test vectors');
 w();
 w('Byte-accurate test vectors for the deterministic voucher commitment');
 w('construction of [FFOR §8](ffor-offline-receive.md) (`C_i^R`), computed with');
-w("the beignet Lightning library's BOLT 3 commitment builder and signer —");
+w("the beignet Lightning library's BOLT 3 commitment builder and signer:");
 w('every transaction and signature below was built, signed, and verified by');
 w('running code, not written by hand. All hex is lowercase; all signatures are');
 w('deterministic (RFC 6979), so this file regenerates byte-identically.');
@@ -761,7 +761,7 @@ w('`v_k = htlc_amount_k - fee(htlc_amount_k)`. All voucher HTLCs use');
 w(`\`cltv_expiry = T_exp = ${T_EXP}\`.`);
 w();
 w('> Note: payment 2 was originally scripted as 250,000 msat, but that yields');
-w('> `v_2 = 247,750 msat` — below the voucher dust floor (`dust_limit` 546 sat;');
+w('> `v_2 = 247,750 msat`, below the voucher dust floor (`dust_limit` 546 sat;');
 w('> the second-level HTLC fee term is zero under');
 w('> `option_anchors_zero_fee_htlc_tx`), so a compliant `S` MUST reject it');
 w('> (FFOR §8). It is bumped to the smallest round amount that does not trim:');
@@ -802,7 +802,7 @@ w('it appears in the final witness stack.');
 w();
 
 for (const c of commits) {
-	w(`### A.3.${c.i} \`C_${c.i}\` — commitment number ${c.commitmentNumber}${c.i === 0 ? ' (pre-epoch base state)' : `, vouchers 1..${c.i}`}`);
+	w(`### A.3.${c.i} \`C_${c.i}\`, commitment number ${c.commitmentNumber}${c.i === 0 ? ' (pre-epoch base state)' : `, vouchers 1..${c.i}`}`);
 	w();
 	w('| Field | Value |');
 	w('|---|---|');
@@ -836,7 +836,7 @@ for (const c of commits) {
 	w(c.txHex);
 	w('```');
 	w();
-	w(`\`S\` commitment signature (\`ff_settlement.commitment_sig\`${c.i === 0 ? ' — informational for C_0; settlement packages start at seq 1' : ''}):`);
+	w(`\`S\` commitment signature (\`ff_settlement.commitment_sig\`${c.i === 0 ? ', informational for C_0; settlement packages start at seq 1' : ''}):`);
 	w();
 	w(`- compact: \`${hex(c.sCommitSig)}\``);
 	w(`- DER + \`SIGHASH_ALL\`: \`${hex(toDerWithSighash(c.sCommitSig, 0x01))}\``);
@@ -928,10 +928,10 @@ w('   published before 2026-07 had `to_remote` on `C_2`/`C_3` one satoshi high')
 w('   from the opposite rule; regenerating against a BOLT 3 conformant builder');
 w('   is what fixes them (see the errata note at the head of this file).');
 w('4. **`htlc_sigs` ordering (§9.1):** "BOLT 3 output order" is *not* voucher');
-w('   sequence order — on `C_2`/`C_3`, voucher 2 (546 sat) sorts before');
+w('   sequence order: on `C_2`/`C_3`, voucher 2 (546 sat) sorts before');
 w('   voucher 1 (994 sat). The vectors exercise this; implementations must map');
 w('   sigs by output index, not by `seq`.');
-w('5. **beignet fidelity:** no deviations were required — beignet\'s builder');
+w('5. **beignet fidelity:** no deviations were required; beignet\'s builder');
 w('   expresses the full construction (anchors + static_remotekey, frozen');
 w('   feerate, far-future `cltv_expiry = 800000`, explicit commitment numbers,');
 w('   BOLT 3 trimming/ordering/remainders) without modification.');

@@ -29,17 +29,17 @@ Prototyped in [beignet](https://github.com/coreyphillips/beignet) on the
 through M7 are complete** and every on-chain gate is validated against live regtest
 bitcoind:
 
-- **M1/M2** — epoch setup, variant-A settlement, reconciliation: a payer's payment
+- **M1/M2**, epoch setup, variant-A settlement, reconciliation: a payer's payment
   completes end-to-end while the recipient is offline; the spec's test vectors are
   reproduced byte-exactly by the implementation.
-- **M3** — on-chain enforcement: recipient force-close with voucher sweeps, and the
+- **M3**, on-chain enforcement: recipient force-close with voucher sweeps, and the
   revoked-state justice path.
-- **M4** — the Variant B tower: settlement is gated on tower-held preimages; the
+- **M4**, the Variant B tower: settlement is gated on tower-held preimages; the
   recipient recovers all funds from the tower alone after the settlement peer vanishes.
-- **M5** — escapes: the full pre-signed escape lifecycle (broadcast, seed-only voucher
+- **M5**, escapes: the full pre-signed escape lifecycle (broadcast, seed-only voucher
   claim, timeout refund, stale-escape penalty); Appendix B's script and weight tables
   confirmed exact on-chain.
-- **M6** — liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
+- **M6**, liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
   splice-on-return, and a 21-case crash matrix covering every protocol arrow.
 - **M7**, hardening the tower into a service: durable store and restart contract,
   BOLT-8 tower transport (spec Appendix C), role separation and node-embedded
