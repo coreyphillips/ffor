@@ -1,5 +1,24 @@
 # FFOR Appendix A: canonical `C_i^R` test vectors
 
+> **ERRATA (2026-07-25): `C_2` and `C_3` are superseded. Do not implement against
+> them yet.**
+>
+> These vectors were generated under the rule FFOR §8 used to state, that a voucher's
+> sub-satoshi millisatoshi remainder stays with the offerer. BOLT 3 does the opposite:
+> the offerer's balance is reduced by the full millisatoshi amount, every output is
+> floored, and the remainder raises the on-chain fee. §8 has been corrected.
+>
+> Consequence: `to_remote` on `C_2` should be **6,994,129** sat (listed: 6,994,130) and
+> on `C_3` **6,943,950** sat (listed: 6,943,951). `C_0` and `C_1` are unaffected, since
+> neither carries a remainder. Because the commitment bytes change, every `C_2`/`C_3`
+> txid, commitment signature, HTLC-success transaction, sighash and HTLC signature below
+> changes with them.
+>
+> `tools/generate-ffor-vectors.ts` now asserts the BOLT 3 identity directly and will
+> refuse to emit until the commitment builder it calls implements it. Regenerating
+> against a corrected builder is what retires this note. Tracked in
+> [#2](https://github.com/coreyphillips/ffor/issues/2).
+
 Byte-accurate test vectors for the deterministic voucher commitment
 construction of [FFOR §8](ffor-offline-receive.md) (`C_i^R`), computed with
 the beignet Lightning library's BOLT 3 commitment builder and signer —
@@ -135,10 +154,14 @@ Cumulative voucher value: 51289250 msat <= budget 100000000 msat.
 `P_1` is `per_commitment_secret_S[n0]` per the Variant-A `H_1` binding;
 `P_2`/`P_3` are the documented constants above (Appendix C style).
 
-Sub-satoshi remainders (BOLT 3): `v_2` carries a 250 msat remainder. The
-voucher output is floored to 546 sat and the 250 msat stays with the party
-that offered the HTLC — `S` — i.e. it is accounted in `S`'s `to_remote`
-balance on `C_2`/`C_3`, not dropped to fees.
+Sub-satoshi remainders (BOLT 3): `v_2` carries a 250 msat remainder.
+`S`'s balance is reduced by the full 546,250 msat, the voucher output is
+floored to 546 sat, and the 250 msat is **not** returned to `S`: it raises
+the commitment's on-chain fee above the base fee. `S`'s `to_remote` on
+`C_2`/`C_3` is therefore `floor(balance_msat / 1000)` with nothing added
+back. The generator asserts this identity per FFOR §8. **The `C_2`/`C_3`
+values printed below predate this correction; see the errata at the head of
+this file.**
 
 ## A.3 Commitment transactions `C_0..C_3`
 
@@ -419,6 +442,10 @@ emit vectors if any fails):
    `P_1·G = per_commitment_point_S[n0]` (FFOR §7.2 Variant-A binding).
 7. Each commitment tx hex round-trips through the transaction decoder to
    the same txid.
+8. For every `C_i`: `to_remote` equals
+   `floor((S balance msat − base fee msat − anchors msat) / 1000)`, the BOLT 3
+   millisatoshi rounding rule of FFOR §8. This assertion is what the errata at
+   the head of this file refers to; it currently fails on `C_2`/`C_3`.
 
 Additionally (out-of-band, not a generator assertion): the `C_0..C_3` hex
 and the HTLC-success transactions were decoded with Bitcoin Core 29.1
@@ -446,19 +473,17 @@ byte-identical results.
    since delegated verification and fraud proofs need to re-encode anyway.
    The spec could state explicitly that `commitment_sig`/`htlc_sigs` use the
    BOLT 2 64-byte compact encoding.
-2. **Voucher dust floor with anchors (§8):** §8 defines the floor as
-   `dust_limit + HTLC-success fee at the frozen feerate`. Under
-   `option_anchors_zero_fee_htlc_tx` the second-level fee is zero, so the
-   floor is exactly `dust_limit`. The spec text is correct but worth an
-   explicit note; the scripted 250,000 msat payment 2 trims at these
-   parameters and was bumped to 550,000 msat (see A.2).
-3. **Sub-satoshi remainders (§8):** "`S`'s `to_local` is reduced by `Σ v_k`"
-   is exact in msat, but on-chain the voucher output is floored to whole
-   satoshis and BOLT 3 keeps the truncated remainder with the *offerer*
-   (`S`) — visible here as `v_2`'s 250 msat staying in `S`'s balance
-   (`to_remote` on `C_2`/`C_3` is 1 sat higher than a naive floor-everything
-   calculation). Deterministic reconstruction must implement this rule; the
-   spec should reference it.
+2. **Voucher dust floor with anchors (§8):** the floor is exactly
+   `dust_limit`, since every channel this spec permits carries
+   `option_anchors` and its second-level HTLC transactions are zero-fee.
+   The scripted 250,000 msat payment 2 trims at these parameters and was
+   bumped to 550,000 msat (see A.2).
+3. **Sub-satoshi remainders (§8):** the offerer's balance is reduced by the
+   full millisatoshi `v_k` and every output is floored, so the truncated
+   remainder raises the on-chain fee rather than returning to `S`. Vectors
+   published before 2026-07 had `to_remote` on `C_2`/`C_3` one satoshi high
+   from the opposite rule; regenerating against a BOLT 3 conformant builder
+   is what fixes them (see the errata note at the head of this file).
 4. **`htlc_sigs` ordering (§9.1):** "BOLT 3 output order" is *not* voucher
    sequence order — on `C_2`/`C_3`, voucher 2 (546 sat) sorts before
    voucher 1 (994 sat). The vectors exercise this; implementations must map

@@ -203,6 +203,9 @@ const MIN_PAYMENT_MSAT = 10_000n;
 const S_BALANCE_MSAT_PRE = 7_000_000_000n;
 const R_BALANCE_MSAT_PRE = 3_000_000_000n;
 
+// Two 330 sat anchors, charged to the funder alongside the base commitment fee.
+const ANCHOR_TOTAL_SAT = 660n;
+
 // Delegated payments. Payment 2 was specified as 250,000 msat, but
 // v = 0.995a - 1000 gives 247,750 msat < the 546,000 msat voucher dust floor
 // (dust_limit 546 sat; zero-fee second-level HTLC txs under option_anchors),
@@ -565,6 +568,31 @@ for (let i = 0; i <= 3; i++) {
 
 	// Output map rows
 	const om = built.result.outputMap;
+
+	// ── Verification 5: BOLT 3 millisatoshi rounding (FFOR §8) ────────────────
+	// BOLT 3 reduces the offerer's balance by the FULL millisatoshi HTLC amount and
+	// then floors every output to whole satoshis; the truncated sub-satoshi
+	// remainders are not returned to the offerer, they raise the on-chain fee above
+	// the base fee. Reference: BOLT 3 "Commitment Transaction Construction" ("The
+	// amounts for each output MUST be rounded down to whole satoshis"), CLN
+	// channeld/commit_tx.c (amount_msat_to_sat_round_down over balances that already
+	// had the full msat deducted), LDK sign/tx_builder.rs (checked_sub of the full
+	// msat HTLC totals).
+	//
+	// This is the one place where a one-satoshi divergence silently invalidates every
+	// signature below, so it is a hard assertion rather than a note.
+	{
+		const baseFeeSat = calculateCommitmentFee(FEERATE_PER_KW, i, true, false);
+		const expectedToRemoteSat =
+			(sState.localBalanceMsat - baseFeeSat * 1000n - ANCHOR_TOTAL_SAT * 1000n) /
+			1000n;
+		assert(
+			BigInt(tx.outs[om.toRemote!].value) === expectedToRemoteSat,
+			`C_${i}: to_remote = floor(S balance msat / 1000) per BOLT 3 ` +
+				`(expected ${expectedToRemoteSat}, got ${tx.outs[om.toRemote!].value}); ` +
+				`sub-satoshi HTLC remainders go to the on-chain fee, not back to S`
+		);
+	}
 	const outputRows = tx.outs.map((o, idx) => {
 		let kind = '';
 		if (idx === om.toLocal) kind = 'to_local (R)';
@@ -753,10 +781,12 @@ w();
 w('`P_1` is `per_commitment_secret_S[n0]` per the Variant-A `H_1` binding;');
 w('`P_2`/`P_3` are the documented constants above (Appendix C style).');
 w();
-w('Sub-satoshi remainders (BOLT 3): `v_2` carries a 250 msat remainder. The');
-w('voucher output is floored to 546 sat and the 250 msat stays with the party');
-w("that offered the HTLC — `S` — i.e. it is accounted in `S`'s `to_remote`");
-w('balance on `C_2`/`C_3`, not dropped to fees.');
+w('Sub-satoshi remainders (BOLT 3): `v_2` carries a 250 msat remainder.');
+w("`S`'s balance is reduced by the full 546,250 msat, the voucher output is");
+w('floored to 546 sat, and the 250 msat is **not** returned to `S`: it raises');
+w("the commitment's on-chain fee above the base fee. `S`'s `to_remote` on");
+w('`C_2`/`C_3` is therefore `floor(balance_msat / 1000)` with nothing added');
+w('back. The generator asserts this identity per FFOR §8.');
 w();
 
 w('## A.3 Commitment transactions `C_0..C_3`');
@@ -856,6 +886,9 @@ w('6. `H_1 = SHA256(per_commitment_secret_S[n0])` and');
 w('   `P_1·G = per_commitment_point_S[n0]` (FFOR §7.2 Variant-A binding).');
 w('7. Each commitment tx hex round-trips through the transaction decoder to');
 w('   the same txid.');
+w('8. For every `C_i`: `to_remote` equals');
+w('   `floor((S balance msat − base fee msat − anchors msat) / 1000)`, the BOLT 3');
+w('   millisatoshi rounding rule of FFOR §8.');
 w();
 w('Additionally (out-of-band, not a generator assertion): the `C_0..C_3` hex');
 w('and the HTLC-success transactions were decoded with Bitcoin Core 29.1');
@@ -883,19 +916,17 @@ w('   both the 64-byte compact form and the DER+sighash form used in witnesses,'
 w('   since delegated verification and fraud proofs need to re-encode anyway.');
 w('   The spec could state explicitly that `commitment_sig`/`htlc_sigs` use the');
 w('   BOLT 2 64-byte compact encoding.');
-w('2. **Voucher dust floor with anchors (§8):** §8 defines the floor as');
-w('   `dust_limit + HTLC-success fee at the frozen feerate`. Under');
-w('   `option_anchors_zero_fee_htlc_tx` the second-level fee is zero, so the');
-w('   floor is exactly `dust_limit`. The spec text is correct but worth an');
-w('   explicit note; the scripted 250,000 msat payment 2 trims at these');
-w('   parameters and was bumped to 550,000 msat (see A.2).');
-w('3. **Sub-satoshi remainders (§8):** "`S`\'s `to_local` is reduced by `Σ v_k`"');
-w('   is exact in msat, but on-chain the voucher output is floored to whole');
-w('   satoshis and BOLT 3 keeps the truncated remainder with the *offerer*');
-w("   (`S`) — visible here as `v_2`'s 250 msat staying in `S`'s balance");
-w('   (`to_remote` on `C_2`/`C_3` is 1 sat higher than a naive floor-everything');
-w('   calculation). Deterministic reconstruction must implement this rule; the');
-w('   spec should reference it.');
+w('2. **Voucher dust floor with anchors (§8):** the floor is exactly');
+w('   `dust_limit`, since every channel this spec permits carries');
+w('   `option_anchors` and its second-level HTLC transactions are zero-fee.');
+w('   The scripted 250,000 msat payment 2 trims at these parameters and was');
+w('   bumped to 550,000 msat (see A.2).');
+w('3. **Sub-satoshi remainders (§8):** the offerer\'s balance is reduced by the');
+w('   full millisatoshi `v_k` and every output is floored, so the truncated');
+w('   remainder raises the on-chain fee rather than returning to `S`. Vectors');
+w('   published before 2026-07 had `to_remote` on `C_2`/`C_3` one satoshi high');
+w('   from the opposite rule; regenerating against a BOLT 3 conformant builder');
+w('   is what fixes them (see the errata note at the head of this file).');
 w('4. **`htlc_sigs` ordering (§9.1):** "BOLT 3 output order" is *not* voucher');
 w('   sequence order — on `C_2`/`C_3`, voucher 2 (546 sat) sorts before');
 w('   voucher 1 (994 sat). The vectors exercise this; implementations must map');
