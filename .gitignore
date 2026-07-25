@@ -1,2 +1,4 @@
 .claude/
 tools/node_modules/
+.DS_Store
+.idea/
