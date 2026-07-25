@@ -21,7 +21,7 @@
 
 Byte-accurate test vectors for the deterministic voucher commitment
 construction of [FFOR §8](ffor-offline-receive.md) (`C_i^R`), computed with
-the beignet Lightning library's BOLT 3 commitment builder and signer —
+the beignet Lightning library's BOLT 3 commitment builder and signer:
 every transaction and signature below was built, signed, and verified by
 running code, not written by hand. All hex is lowercase; all signatures are
 deterministic (RFC 6979), so this file regenerates byte-identically.
@@ -136,7 +136,7 @@ R's point for commitment number 42 (the pre-epoch state).
 `cltv_expiry = T_exp = 800000`.
 
 > Note: payment 2 was originally scripted as 250,000 msat, but that yields
-> `v_2 = 247,750 msat` — below the voucher dust floor (`dust_limit` 546 sat;
+> `v_2 = 247,750 msat`, below the voucher dust floor (`dust_limit` 546 sat;
 > the second-level HTLC fee term is zero under
 > `option_anchors_zero_fee_htlc_tx`), so a compliant `S` MUST reject it
 > (FFOR §8). It is bumped to the smallest round amount that does not trim:
@@ -174,7 +174,7 @@ in `ff_settlement.commitment_sig` / `htlc_sigs` (and BOLT 2 wire messages);
 `DER` is the same signature DER-encoded with the sighash byte appended, as
 it appears in the final witness stack.
 
-### A.3.0 `C_0` — commitment number 42 (pre-epoch base state)
+### A.3.0 `C_0`, commitment number 42 (pre-epoch base state)
 
 | Field | Value |
 |---|---|
@@ -209,12 +209,12 @@ Transaction (unsigned funding input, as signed by both parties):
 0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980044a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994c0c62d00000000002200201200d0622717c41a7fea2aac057cde8947e81b234ba34cf1bb813090d4f4f07232c26a0000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8381f020
 ```
 
-`S` commitment signature (`ff_settlement.commitment_sig` — informational for C_0; settlement packages start at seq 1):
+`S` commitment signature (`ff_settlement.commitment_sig`, informational for C_0; settlement packages start at seq 1):
 
 - compact: `f75aafba7e6eada88b70a4ae649c13b9ab286e622f2ab6426dc1856bd4afeeeb6e083cdb7b11f68ca29fc8bbf0cdcdf3e3985be71f8acd382159d3e582dc9e3a`
 - DER + `SIGHASH_ALL`: `3045022100f75aafba7e6eada88b70a4ae649c13b9ab286e622f2ab6426dc1856bd4afeeeb02206e083cdb7b11f68ca29fc8bbf0cdcdf3e3985be71f8acd382159d3e582dc9e3a01`
 
-### A.3.1 `C_1` — commitment number 43, vouchers 1..1
+### A.3.1 `C_1`, commitment number 43, vouchers 1..1
 
 | Field | Value |
 |---|---|
@@ -270,7 +270,7 @@ rules: zero fee, input `nSequence = 1`):
 | `S` sig (compact) | `dee0d8437159468b0b67941cf3df7a876271d05f58b7885d9554a6197945eb22701b0aecefacaf7831b62f241d1a1698c1d28729fa1e9ab6b88e9f24a7fdd24f` |
 | `S` sig (DER + `0x83`) | `3045022100dee0d8437159468b0b67941cf3df7a876271d05f58b7885d9554a6197945eb220220701b0aecefacaf7831b62f241d1a1698c1d28729fa1e9ab6b88e9f24a7fdd24f83` |
 
-### A.3.2 `C_2` — commitment number 44, vouchers 1..2
+### A.3.2 `C_2`, commitment number 44, vouchers 1..2
 
 | Field | Value |
 |---|---|
@@ -338,7 +338,7 @@ rules: zero fee, input `nSequence = 1`):
 | `S` sig (compact) | `6db331b2bba37bc22b8ceaf3c199843a1f268061019be24077a0809aea7d4dc945e5c10a3ee058154c50048fa0ee130c936b0e7335614a6dd90ad57f54ca79fb` |
 | `S` sig (DER + `0x83`) | `304402206db331b2bba37bc22b8ceaf3c199843a1f268061019be24077a0809aea7d4dc9022045e5c10a3ee058154c50048fa0ee130c936b0e7335614a6dd90ad57f54ca79fb83` |
 
-### A.3.3 `C_3` — commitment number 45, vouchers 1..3
+### A.3.3 `C_3`, commitment number 45, vouchers 1..3
 
 | Field | Value |
 |---|---|
@@ -485,10 +485,10 @@ byte-identical results.
    from the opposite rule; regenerating against a BOLT 3 conformant builder
    is what fixes them (see the errata note at the head of this file).
 4. **`htlc_sigs` ordering (§9.1):** "BOLT 3 output order" is *not* voucher
-   sequence order — on `C_2`/`C_3`, voucher 2 (546 sat) sorts before
+   sequence order: on `C_2`/`C_3`, voucher 2 (546 sat) sorts before
    voucher 1 (994 sat). The vectors exercise this; implementations must map
    sigs by output index, not by `seq`.
-5. **beignet fidelity:** no deviations were required — beignet's builder
+5. **beignet fidelity:** no deviations were required; beignet's builder
    expresses the full construction (anchors + static_remotekey, frozen
    feerate, far-future `cltv_expiry = 800000`, explicit commitment numbers,
    BOLT 3 trimming/ordering/remainders) without modification.
