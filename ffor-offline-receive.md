@@ -2,12 +2,20 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.8 (2026-07-13), hardened by computed test vectors (Appendix A) and
-  a **complete M1–M6 prototype** (beignet `feat/ffor`: on-chain enforcement, the
-  Variant B tower, the full escape lifecycle, bLIP-51 lease integration, and a 21-case
-  crash matrix — all gates bitcoind-validated; Appendix B's script and weight tables
-  confirmed exact on regtest); wire details below reflect what the prototype actually
-  implements
+- Status: Draft v0.8.1 (2026-07-25), hardened by computed test vectors (Appendix A) and
+  a **complete M1–M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
+  Variant B tower and its durable transport, the full escape lifecycle, bLIP-51 lease
+  integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
+  script and weight tables confirmed exact on regtest); wire details below reflect what
+  the prototype actually implements
+- **v0.8.1 is an errata release.** It corrects §8's millisatoshi rounding rule to
+  BOLT 3's (the previous rule made byte-exact reconstruction fail by one satoshi, and
+  Appendix A's `C_2`/`C_3` still carry it), forbids the §7.2 `H_1` binding in Variant D
+  (where it would have handed `R` a free voucher), bounds the escape window against
+  `T_exp`, demotes `S`'s reported `last_seq` from authoritative to a lower bound, keeps
+  §9.4's role-separation and durability rules alive under §9.5.5, chunks `ff_invoices`,
+  domain-separates the signed digest, and removes several dead constructions. See
+  §17 for the full list.
 - **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
@@ -16,8 +24,8 @@
   taproot construction crosses it either. §13.7 records an invoice-reuse theft vector that
   **no** variant currently closes, confirmed against the reference implementation.
   §5.1's `to_self_delay` direction is confirmed against BOLT 2. Variant D itself is
-  unprototyped (M8, §15.1)
-- Author: Corey Phillips (with Claude)
+  unprototyped (M8, §15.2)
+- Author: Corey Phillips
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
 
@@ -98,7 +106,7 @@ packages, the voucher output, tower mediation, escape transactions, and reconcil
 |---|---|
 | `R` | Recipient. Goes offline; owns the invoices; is credited via vouchers. |
 | `S` | Settlement peer. Any direct channel peer of `R` implementing this spec. Stays online, settles delegated payments upstream, issues fast-forward updates. |
-| `T` | Tower/mailbox (Variant B only). An always-online agent chosen by `R`. Holds preimages hostage against valid settlement packages; stores packages; watches for revoked broadcasts. Holds **no funds** and no channel keys (one scoped exception, §9.4). |
+| `T` | Tower/mailbox. An always-online agent chosen by `R`, used by Variant B and optionally by Variant D (§9.5.5). Holds preimages hostage against valid settlement packages; stores packages; watches for revoked broadcasts. Holds **no funds** and no channel keys (one scoped exception, §9.4). |
 | epoch | One contiguous offline window governed by one delegation. At most one active per channel. |
 | voucher | The per-payment credit: a received-HTLC output on `R`'s commitment with `cltv_expiry = T_exp`. |
 | settlement package | The signed bundle `S` produces per payment: new commitment signature, HTLC signatures, (first package) revocation secret, (Variant A) preimage. |
@@ -153,7 +161,11 @@ shows why no script, covenant, or taproot construction changes it.
 ## 5. Prerequisites
 
 - The channel MUST use `option_static_remotekey` and `option_anchors` (v1 targets
-  ECDSA anchor commitments; simple-taproot channels: see §13.4).
+  ECDSA anchor commitments; simple-taproot channels: see §13.4). `option_anchors` here
+  means the current BOLT 2/3 channel type with zero-fee second-level HTLC transactions,
+  formerly spelled `option_anchors_zero_fee_htlc_tx`. The superseded
+  `option_anchor_outputs` type is not supported, and the spec's dust and weight
+  arithmetic assumes it is absent.
 - Both nodes MUST support quiescence (`option_quiesce` / as used by splicing): epoch
   setup and reconciliation both begin from a quiescent channel with **no pending HTLCs**
   and no in-flight `update_fee`.
@@ -233,10 +245,14 @@ abnormal exits: `R` never returns (escape, §10) or `S` misbehaves (penalty/frau
 The core trick, restated precisely: a channel update that only *increases* the
 counterparty's claim can be made unilaterally if the updater first revokes its own
 current commitment, because the updater can no longer profit from broadcasting anything.
-After fast-forward #1, `S` has **no broadcastable commitment at all** (its only signed
-state is revoked) and remains in that condition until `R` returns and countersigns — or
-until `S` uses a pre-signed escape. `R`'s side is unaffected: each `C_i^R` it inherits
-is strictly better for it than the last, and `R` reveals no secrets until reconciliation.
+After fast-forward #1, the only commitment `S` has ever signed is revoked, and `S` holds
+no successor, so with `G = 0` it has **nothing broadcastable at all** until `R` returns
+and countersigns. With `G > 0` the pre-signed escapes at `n0 + 1` are the one exception:
+they are `R`-signed states `S` can complete and broadcast whenever it likes, so §10's
+timing rule is protocol policy rather than something script enforces, and §9.3 states
+the condition in that form. `R`'s side is unaffected either way: each `C_i^R` it
+inherits is strictly better for it than the last, and `R` reveals no secrets until
+reconciliation.
 
 ---
 
@@ -378,9 +394,12 @@ message is needed:
 
 | Field | Size | Description |
 |---|---|---|
-| `num_escapes` (`J`) | u16 | `= ceil(budget_msat / G)` |
+| `num_escapes` (`J`) | u16 | MUST equal `ceil(budget_msat / G)`; `S` rejects any other value with `ff_error` |
 | `escape_sigs` | J×64 | `R`'s signature on escape commitment `E_j` for `j = 1…J` |
-| `escape_htlc_sigs` | J×64 | optional trailing field, MUST be **omitted** in v1 — the aggregate voucher needs no second-level transaction (its CLTV and revocation-delay are applied directly in-script; Appendix B). Decoders MUST tolerate its absence and ignore it if present. |
+
+There are no HTLC signatures here. The aggregate voucher needs no second-level
+transaction, because its CLTV and revocation delay are applied directly in-script
+(Appendix B.1, B.2).
 
 All `E_j` live at `S`'s commitment number `n0 + 1` (whose per-commitment point `R`
 already holds from the last `revoke_and_ack`). They are mutually exclusive alternatives;
@@ -458,10 +477,11 @@ reconstruct it byte-for-byte from the epoch parameters plus the settlement histo
 
 Constraints `S` MUST enforce before accepting delegated payment `i`:
 
-- `htlc_amount_i ≥ min_payment_msat` and `v_i` above the voucher dust floor
-  (`dust_limit + HTLC-success fee at the frozen feerate`; under
-  `option_anchors_zero_fee_htlc_tx` the second term is zero, so the floor is exactly
-  `dust_limit`) — a trimmed voucher would be uncollectible on-chain. The floor
+- `htlc_amount_i ≥ min_payment_msat` and `v_i` above the voucher dust floor, which is
+  exactly `dust_limit`: §5 mandates `option_anchors`, whose second-level HTLC
+  transactions are zero-fee, so the fee term BOLT 3's trim rule would otherwise add is
+  always zero for a channel this spec permits. A trimmed voucher would be
+  uncollectible on-chain. The floor
   guarantees only that the output *exists*, not that it is economically enforceable: a
   near-floor voucher cannot pay for its own second-level claim plus CSV sweep, making
   it collectible only cooperatively. `R` SHOULD size `min_payment_msat` against
@@ -499,7 +519,7 @@ second-level transactions, on-chain resolution, and reconciliation-time conversi
 `update_fulfill_htlc` are all stock BOLT 2/3/5 — a beignet prototype touches no
 commitment-format code. (3) *Crash-ordering safety*: the hash-lock means a package that
 leaks before the upstream claim completes does not by itself let `R` take value `S`
-never received (§9.2 ordering makes this window `S`-safe in both variants).
+never received (§9.2 ordering makes this window `S`-safe in Variants A and B).
 
 ---
 
@@ -517,7 +537,7 @@ never received (§9.2 ordering makes this window `S`-safe in both variants).
 | `commitment_sig` | 64 | `S`'s signature on `C_i^R` (BOLT 2 compact 64-byte encoding, as in `commitment_signed`) |
 | `num_htlc_sigs` | u16 | = i |
 | `htlc_sigs` | i×64 | `S`'s signatures (compact encoding) for the HTLC-success spend of **every** voucher output on `C_i^R`, in BOLT 3 commitment **output-index order** — not voucher `seq` order (§8) — (`SIGHASH_SINGLE|ANYONECANPAY`, anchor rules) |
-| TLV 1: `revocation_secret_n0` | 32 | **REQUIRED in `seq == 1`, both variants**: `per_commitment_secret_S[n0]`. This is the *pre-revocation*: from this moment `S` has no broadcastable state. |
+| TLV 1: `revocation_secret_n0` | 32 | **REQUIRED in `seq == 1`, Variants A and B**: `per_commitment_secret_S[n0]`. This is the *pre-revocation*: from this moment `S` has no broadcastable state. |
 | TLV 3: `preimage` | 32 | Variant A only: `P_i` |
 | TLV 5: `upstream_scid` | 8 | optional, audit |
 | `signature` | 64 | `S`'s node-key sig over the package (the fraud-proof anchor: `S` provably committed to crediting `v_i` against `H_i`) |
@@ -542,8 +562,8 @@ HTLC is irrevocably committed and all §8 checks pass:
 **Variant B** (`T` knows `t_i`):
 1. `S` durably persists the package and sends it to `T`.
 2. `T` runs the verification checklist (§9.4). On success `T` durably stores the package
-   **before** replying `ff_release {seq, preimage t_i}` (transport between `S` and `T`
-   is out of scope: HTTPS, onion message, or a direct Noise connection all work).
+   **before** replying `ff_tower_release_resp {seq, preimage t_i}` (transport in
+   Appendix C).
 3. `S` settles upstream with `t_i`.
 
 The order makes both parties safe: `S` acquires the preimage exactly when the package is
@@ -625,7 +645,7 @@ offline the whole time, so it cannot rely on `R` re-supplying anything):
   signed copies are §12.2 evidence); and (c) verify and release the *next* `seq` — which
   requires the rehydrated provisioning, not just the record.
 
-Release semantics: `ff_release` MUST be **idempotent by `seq`** (an `S` that crashes
+Release semantics: `ff_tower_release_resp` MUST be **idempotent by `seq`** (an `S` that crashes
 after the tower stored-and-released but before fulfilling upstream re-requests the same
 `seq` and gets the same `t_i`). On rejection or non-response, `S` MUST fail the payment
 upstream: it has no preimage and no other safe move.
@@ -1248,7 +1268,7 @@ this spec that no variant's cryptography addresses, and unlike Variant A's withh
 is **not bounded by the epoch budget**: it is bounded only by what payers actually send.
 
 Characterized against the reference implementation (beignet `feat/ffor`) in a two-test
-gate (M8.8, §15.1), which sharpened the finding. An **honest** `S` *does* refuse the
+gate (M8.8, §15.2), which sharpened the finding. An **honest** `S` *does* refuse the
 duplicate: on a second payment for a consumed hash it fails upstream with
 `duplicate delegated payment for consumed hash H_k`. Single-use is implemented. But that
 refusal is **self-imposed by `S` and unverifiable by anyone else**. The tower's gate is
@@ -1299,13 +1319,19 @@ Until one of those lands, this bounds how much invoice distribution may be deleg
 | 55019 | `ff_revoke_batch` | R→S | |
 | 55021 | `ff_end` | both | |
 | 55023 | `ff_error` | both | |
-| — | `ff_release` | T→S | transport-defined |
+| 55031 | `ff_tower_provision` | R→T | |
+| 55033 | `ff_tower_ack` | T→R | |
+| 55035 | `ff_tower_release` | S→T | (carries the ✍ `ff_settlement`) |
+| 55037 | `ff_tower_release_resp` | T→S | |
+| 55039 | `ff_tower_fetch` | R→T | ✍ (§9.4 digest) |
+| 55041 | `ff_tower_fetch_resp` | T→R | |
+
+55007 is not a message type; it is the `node_announcement` TLV below.
 
 `channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
-§11.3) and 55043 (tower service advertisement, §11.3). Tower transport messages
-55031–55041 (Appendix C). All numbers provisional
+§11.3) and 55043 (tower service advertisement, §11.3). All numbers provisional
 pending bLIP assignment.
 
 **Variant D (§9.5) allocates no new message types.** It uses `ff_init` (`variant = 4`),
@@ -1313,10 +1339,12 @@ pending bLIP assignment.
 is committed by a stock BOLT 2 `commitment_signed` / `revoke_and_ack` round, settlement
 sends no message, and reconciliation is stock `update_fulfill_htlc` /
 `update_fail_htlc`. `ff_settlement`, `ff_escape_sigs`, `ff_reconcile`,
-`ff_reconcile_ack`, `ff_revoke_batch`, `ff_release` and the Appendix C tower transport are
-all **unused** in Variant D. `ff_accept` TLV 1 carries the hash set as usual; under
-`variant = 4` it is `S`-generated (§9.5.2). This is the registry's way of saying that
-Variant D is not an extension of the protocol but a large subtraction from it.
+`ff_reconcile_ack`, `ff_revoke_batch` and the Appendix C tower transport are
+all **unused** in plain Variant D (§9.5.5's optional tower uses a reduced form of
+`ff_tower_provision` / `ff_tower_release` / `ff_tower_fetch`). `ff_accept` TLV 1 carries
+the hash set, `S`-generated, **without** the §7.2 `H_1` revocation-secret binding, which
+is forbidden under `variant = 4`. This is the registry's way of saying that Variant D is
+not an extension of the protocol but a large subtraction from it.
 
 Appendices: (A) canonical `C_i^R` construction test vectors — see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights —
@@ -1351,7 +1379,36 @@ handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
    splice-on-return; crash matrix at every arrow in §6's diagram; multi-payment epochs
    at `K` and budget boundaries.
 
-### 15.1 M8: Variant D and watchtower-free operation
+### 15.1 M7: hardening the tower into a deployable service
+
+M4 proved a tower can gate settlement. M7 turned that prototype into something that
+survives operations, and its results are normative in §9.4, §11.3 and Appendix C rather
+than being confined to this list.
+
+1. **M7.0: Durable store and restart contract.** `T` persists the full provisioning
+   bundle, not just the settlement record, and rehydrates every epoch on restart with no
+   `R` involvement. Gate: restart mid-epoch with `R` offline throughout; `T` still
+   serves released preimages idempotently, still rejects a differing package for an
+   already-released `seq`, and still verifies and releases the *next* `seq`. Normative
+   in §9.4's restart contract.
+2. **M7.1: Tower transport.** `T` reached as a directly-dialed BOLT-8 peer, with the
+   provision / release / fetch request-response pairs. Gate: all three operations over a
+   real Noise session, correlated by `request_id`. Normative in **Appendix C**.
+3. **M7.2: Role separation and node-embedded breach-watch.** A tower running inside a
+   full node refuses epochs where it is `S` (and should refuse where it is `R`), and
+   arms funding-outpoint watches from durable state on restart. Gate: provisioning
+   rejected on identity collision; a mid-epoch revoked broadcast routed to the breach
+   classifier after a tower restart. Normative in §9.4.
+4. **M7.4: Tower discovery.** `T` advertises its terms in `node_announcement` TLV
+   55043; `R` selects from the gossip graph rather than out-of-band configuration. Gate:
+   an `R` with no pre-configured tower provisions one found in gossip and completes an
+   epoch. Normative in §11.3.
+
+M7.3 is not recorded in this document. The four entries above are reconstructed from the
+work that landed in §9.4, §11.3 and Appendix C; if M7.3 produced anything normative it
+still needs writing up here.
+
+### 15.2 M8: Variant D and watchtower-free operation
 
 M8 validates that the tower can be removed on both axes (§5.1 for watching, §9.5 for
 mediating). It should be cheaper than any prior milestone, because Variant D deletes
@@ -1435,6 +1492,34 @@ async-payment designs provide.
 
 ---
 
+## 17. Errata
+
+### 17.1 v0.8 → v0.8.1
+
+Behaviour changes. An implementation built against v0.8 is not interoperable with one
+built against v0.8.1 in any of these respects.
+
+| # | Section | v0.8 | v0.8.1 |
+|---|---|---|---|
+| 1 | §8 | A voucher's sub-satoshi remainder stays with the offerer's `to_local` | BOLT 3's rule: the offerer's balance drops by the full millisatoshi and every output is floored, so the remainder raises the on-chain fee. Appendix A's `C_2`/`C_3` still encode the old rule and are marked errata there |
+| 2 | §7.2, §14 | `ff_accept` TLV 1's `H_1` binding was scoped ambiguously | Binding is Variant A only and **forbidden** in Variant D, where `S` reveals `per_commitment_secret_S[n0]` in the setup `revoke_and_ack` and the binding would hand `R` an unpaid voucher |
+| 3 | §7.1, §10, §11.2 | Nothing bounded `T_exp − D` | With `G > 0`, `T_exp ≤ D + escape_delay`, so the escape window cannot open inside `R`'s reconciliation window |
+| 4 | §11.1 | `S`'s `last_seq` is authoritative for the replay count | It is a lower bound; `R` adopts the highest `seq` it can validate from any source |
+| 5 | §8 | Reserve checked on `S` only; `K` bounded by `min(max_accepted_htlcs)` | Both parties' reserves checked with the funder's fee delta charged correctly; `K ≤ R`'s `max_accepted_htlcs` and `K ≤ 483` |
+| 6 | §9.5.5 | §9.4's role-separation and restart contract "disappear" | Both still bind (in reduced form for durability); only the node-embedded breach-watch drops out |
+| 7 | §7.3 | Invoices amountless and strictly ordered, unconditionally | Per-variant: A/B amountless and ordered, D fixed-amount and unordered. Message is now chunked |
+| 8 | §7.4 | `J` unbounded | `J ≤ 1022`, rejected at `ff_init`; `num_escapes` validated on receipt rather than at `ff_init` (§B.5) |
+| 9 | §7 | Signature over `SHA256(type ‖ body)` | Domain-separated: `SHA256("ffor/msg" ‖ type ‖ body)` |
+| 10 | §9.4, C.1, C.2 | Fetch nonce "`T`-issued", with no message issuing one; `last_released` 4 bytes; `r_node_id` absent from the bundle | Requester-chosen nonce with `T` rejecting repeats; `last_released` `u16`; `r_node_id` in the bundle |
+
+Editorial only, no behaviour change: `escape_htlc_sigs` removed (§7.4); the
+`option_anchors` / `option_anchors_zero_fee_htlc_tx` duality collapsed (§5, §8);
+`ff_release` renamed to Appendix C's `ff_tower_release_resp`; §6's "no broadcastable
+commitment at all" qualified for the `G > 0` case; §14's registry lists the Appendix C
+messages; §15.1 documents M7 and M8 moves to §15.2.
+
+---
+
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
 ### B.1 Deterministic construction of `E_j`
@@ -1471,8 +1556,8 @@ signature on `E_j`. Both sides MUST derive the set independently and byte-identi
 There are **no second-level transactions**: unlike a BOLT 3 offered HTLC, whose timeout
 path is a 2-of-2 routed through a pre-signed HTLC-timeout transaction so the CSV
 revocation-delay can ride on top of the CLTV, the aggregate voucher applies both
-timelocks directly in-script on `S`'s single-sig branch (§B.2). The `escape_htlc_sigs`
-field stays empty in v1.
+timelocks directly in-script on `S`'s single-sig branch (§B.2). `ff_escape_sigs`
+therefore carries commitment signatures only.
 
 ### B.2 Aggregate voucher witness script
 
@@ -1568,8 +1653,10 @@ larger justice transaction; a real penalty sweep amortizes overhead across all o
   (path 1), and any `E_j` before reconciliation as an escape to be audited against the
   package history (§12.1).
 - Implementations MUST reject `ff_init` where `G > 0` and `G` violates §10's
-  multiple-of-1000/dust-floor constraints, or where `J·G − budget ≥ G` (malformed
-  granularity).
+  multiple-of-1000/dust-floor constraints, or whose implied `J` exceeds §7.4's bound.
+- `S` MUST reject an `ff_escape_sigs` whose `num_escapes` is not exactly
+  `ceil(budget_msat / G)`. (The check belongs here, on a value a peer actually sends:
+  `J` is not a field of `ff_init`, where it is derived and therefore unfalsifiable.)
 
 ---
 
