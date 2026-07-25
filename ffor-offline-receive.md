@@ -9,8 +9,8 @@
   script and weight tables confirmed exact on regtest); wire details below reflect what
   the prototype actually implements
 - **v0.8.1 is an errata release.** It corrects §8's millisatoshi rounding rule to
-  BOLT 3's (the previous rule made byte-exact reconstruction fail by one satoshi, and
-  Appendix A's `C_2`/`C_3` still carry it), forbids the §7.2 `H_1` binding in Variant D
+  BOLT 3's (the previous rule made byte-exact reconstruction fail by one satoshi;
+  Appendix A has been regenerated), forbids the §7.2 `H_1` binding in Variant D
   (where it would have handed `R` a free voucher), bounds the escape window against
   `T_exp`, demotes `S`'s reported `last_seq` from authoritative to a lower bound, keeps
   §9.4's role-separation and durability rules alive under §9.5.5, chunks `ff_invoices`,
@@ -1501,7 +1501,7 @@ built against v0.8.1 in any of these respects.
 
 | # | Section | v0.8 | v0.8.1 |
 |---|---|---|---|
-| 1 | §8 | A voucher's sub-satoshi remainder stays with the offerer's `to_local` | BOLT 3's rule: the offerer's balance drops by the full millisatoshi and every output is floored, so the remainder raises the on-chain fee. Appendix A's `C_2`/`C_3` still encode the old rule and are marked errata there |
+| 1 | §8 | A voucher's sub-satoshi remainder stays with the offerer's `to_local` | BOLT 3's rule: the offerer's balance drops by the full millisatoshi and every output is floored, so the remainder raises the on-chain fee. Appendix A regenerated against a corrected builder: `C_0`/`C_1` unchanged, `C_2`'s `to_remote` 6994130 to 6994129 and `C_3`'s 6943951 to 6943950, with the dependent txids and signatures |
 | 2 | §7.2, §14 | `ff_accept` TLV 1's `H_1` binding was scoped ambiguously | Binding is Variant A only and **forbidden** in Variant D, where `S` reveals `per_commitment_secret_S[n0]` in the setup `revoke_and_ack` and the binding would hand `R` an unpaid voucher |
 | 3 | §7.1, §10, §11.2 | Nothing bounded `T_exp − D` | With `G > 0`, `T_exp ≤ D + escape_delay`, so the escape window cannot open inside `R`'s reconciliation window |
 | 4 | §11.1 | `S`'s `last_seq` is authoritative for the replay count | It is a lower bound; `R` adopts the highest `seq` it can validate from any source |
