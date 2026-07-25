@@ -1,24 +1,5 @@
 # FFOR Appendix A: canonical `C_i^R` test vectors
 
-> **ERRATA (2026-07-25): `C_2` and `C_3` are superseded. Do not implement against
-> them yet.**
->
-> These vectors were generated under the rule FFOR §8 used to state, that a voucher's
-> sub-satoshi millisatoshi remainder stays with the offerer. BOLT 3 does the opposite:
-> the offerer's balance is reduced by the full millisatoshi amount, every output is
-> floored, and the remainder raises the on-chain fee. §8 has been corrected.
->
-> Consequence: `to_remote` on `C_2` should be **6,994,129** sat (listed: 6,994,130) and
-> on `C_3` **6,943,950** sat (listed: 6,943,951). `C_0` and `C_1` are unaffected, since
-> neither carries a remainder. Because the commitment bytes change, every `C_2`/`C_3`
-> txid, commitment signature, HTLC-success transaction, sighash and HTLC signature below
-> changes with them.
->
-> `tools/generate-ffor-vectors.ts` now asserts the BOLT 3 identity directly and will
-> refuse to emit until the commitment builder it calls implements it. Regenerating
-> against a corrected builder is what retires this note. Tracked in
-> [#2](https://github.com/coreyphillips/ffor/issues/2).
-
 Byte-accurate test vectors for the deterministic voucher commitment
 construction of [FFOR §8](ffor-offline-receive.md) (`C_i^R`), computed with
 the beignet Lightning library's BOLT 3 commitment builder and signer:
@@ -159,9 +140,7 @@ Sub-satoshi remainders (BOLT 3): `v_2` carries a 250 msat remainder.
 floored to 546 sat, and the 250 msat is **not** returned to `S`: it raises
 the commitment's on-chain fee above the base fee. `S`'s `to_remote` on
 `C_2`/`C_3` is therefore `floor(balance_msat / 1000)` with nothing added
-back. The generator asserts this identity per FFOR §8. **The `C_2`/`C_3`
-values printed below predate this correction; see the errata at the head of
-this file.**
+back. The generator asserts this identity per FFOR §8.
 
 ## A.3 Commitment transactions `C_0..C_3`
 
@@ -278,7 +257,7 @@ rules: zero fee, input `nSequence = 1`):
 | `per_commitment_point_R[44]` | `03e79f120b711e5dcc31d1b1c9a80fd3744179d76c2db74538af0370b9be0351a9` |
 | obscured commitment number | `0xb9c570f08185` |
 | commitment fee (paid by S) | 3670 sat |
-| txid | `8d0d39d5f194be5a83b673206076fd86c1542b5861cda4d04cd3eaa6f38b5634` |
+| txid | `008bec6086ae85c458dabe42afbdd6d41547daf7adb063891889d5c681bd0932` |
 
 Derived keys on this commitment (holder = `R`):
 
@@ -299,18 +278,18 @@ Outputs (BOLT 3 order):
 | 2 | voucher_2 (received HTLC) | 546 | `002081a0988232d977d836994ef831bce0296fe5ec419a01330114ea494ddb3d0542` |
 | 3 | voucher_1 (received HTLC) | 994 | `0020fb1ea333a60802eadc161cbdb5cbb07b6ac9607914e0cbb25062fbda8215e18c` |
 | 4 | to_local (R) | 3000000 | `0020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce11` |
-| 5 | to_remote (S) | 6994130 | `0020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a` |
+| 5 | to_remote (S) | 6994129 | `0020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a` |
 
 Transaction (unsigned funding input, as signed by both parties):
 
 ```
-0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980064a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994220200000000000022002081a0988232d977d836994ef831bce0296fe5ec419a01330114ea494ddb3d0542e203000000000000220020fb1ea333a60802eadc161cbdb5cbb07b6ac9607914e0cbb25062fbda8215e18cc0c62d0000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce11d2b86a0000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8581f020
+0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980064a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994220200000000000022002081a0988232d977d836994ef831bce0296fe5ec419a01330114ea494ddb3d0542e203000000000000220020fb1ea333a60802eadc161cbdb5cbb07b6ac9607914e0cbb25062fbda8215e18cc0c62d0000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce11d1b86a0000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8581f020
 ```
 
 `S` commitment signature (`ff_settlement.commitment_sig`):
 
-- compact: `d15b2fbdb880b6a452c08d9e38f4b6e60020adb00ef70707b7e3ed7dc74afb35201b622b5ae4d68117c09bc8bfc641275ffec5349a183bfa1cd7fd91a03042c9`
-- DER + `SIGHASH_ALL`: `3045022100d15b2fbdb880b6a452c08d9e38f4b6e60020adb00ef70707b7e3ed7dc74afb350220201b622b5ae4d68117c09bc8bfc641275ffec5349a183bfa1cd7fd91a03042c901`
+- compact: `1935f247c5aff016254bda6aa362955c59317a8f4b22fea6b5ce65689a0fd8b20d3b9578efa16049feaf2b9b62bd8e37be12127a97c6fabd06ed9cd7bc8d8134`
+- DER + `SIGHASH_ALL`: `304402201935f247c5aff016254bda6aa362955c59317a8f4b22fea6b5ce65689a0fd8b202200d3b9578efa16049feaf2b9b62bd8e37be12127a97c6fabd06ed9cd7bc8d813401`
 
 `S` HTLC signatures (`ff_settlement.htlc_sigs`, 2 sigs, BOLT 3 output order,
 `SIGHASH_SINGLE|ANYONECANPAY` over the HTLC-success transaction, anchor
@@ -321,22 +300,22 @@ rules: zero fee, input `nSequence = 1`):
 | Field | Value |
 |---|---|
 | HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a91413481522a1b00554bee6c26b32f778b086f9926d8763ac672103be83134be68381c445ce747a6a1f31d29cacbb96d8ffc214e28dc9e0ddf62c117c8201208763a914b43e1b38138a41b37f7cd9a1d274bc63e3a9b5d188527c21038ac88072b68d464d5f225e432d8018fcfcef95b706c65fe07e9462a1baeefcf052ae67750300350cb175ac6851b27568` |
-| HTLC-success tx (unsigned) | `020000000134568bf3a6ead34cd0a4cd61582b54c186fd76602073b6835abe94f1d5390d8d020000000001000000012202000000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce1100000000` |
-| HTLC-success txid | `7b63b5409b4720d53f7c4a8a2b9e375cd1cd3f663c99cde9dd3bee3aa2432672` |
-| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `49c568b6569ab7bee875f9e25d993632b2d870e312893284a47566e14105cfd6` |
-| `S` sig (compact) | `4f04d239e841ee892fe61eafcf6a1d11c7e83356c5e2f325708da089d5909a2a1a9c59fb8b2157564641fffbad1ef9379b26ffa68e600c440195639b69a77287` |
-| `S` sig (DER + `0x83`) | `304402204f04d239e841ee892fe61eafcf6a1d11c7e83356c5e2f325708da089d5909a2a02201a9c59fb8b2157564641fffbad1ef9379b26ffa68e600c440195639b69a7728783` |
+| HTLC-success tx (unsigned) | `02000000013209bd81c6d589188963b0adf7da4715d4d6bdaf42beda58c485ae8660ec8b00020000000001000000012202000000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce1100000000` |
+| HTLC-success txid | `df6e0b8de65e2814cc0e317e05f68e3995cd13f630c80501262cb255a8773a98` |
+| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `303cff5b21bc2e31ab42ba11e9a37a22f71d19abc0aa8ed3857b40e30ef555e4` |
+| `S` sig (compact) | `001b71ddece567494b4ca4cde9a3840f8799902428faea47cc25ef0161539a48250f1d6b4a14de5425537ac35a9112f0346c8717f354fb90369e3c5f580b71e5` |
+| `S` sig (DER + `0x83`) | `3043021f1b71ddece567494b4ca4cde9a3840f8799902428faea47cc25ef0161539a480220250f1d6b4a14de5425537ac35a9112f0346c8717f354fb90369e3c5f580b71e583` |
 
 #### htlc_sig for voucher 1 (output 3, 994 sat)
 
 | Field | Value |
 |---|---|
 | HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a91413481522a1b00554bee6c26b32f778b086f9926d8763ac672103be83134be68381c445ce747a6a1f31d29cacbb96d8ffc214e28dc9e0ddf62c117c8201208763a9149dac0ba2874023dcb252d34da5934a193b73697e88527c21038ac88072b68d464d5f225e432d8018fcfcef95b706c65fe07e9462a1baeefcf052ae67750300350cb175ac6851b27568` |
-| HTLC-success tx (unsigned) | `020000000134568bf3a6ead34cd0a4cd61582b54c186fd76602073b6835abe94f1d5390d8d03000000000100000001e203000000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce1100000000` |
-| HTLC-success txid | `c88d6fd2a47a205e743d5b61353f7cdd76e6d4bb690f06b192c3add63cedd3c3` |
-| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `1da1e2706d9b9f86e0299257c5418882712364cd28780f2da15e3e0af38875bf` |
-| `S` sig (compact) | `6db331b2bba37bc22b8ceaf3c199843a1f268061019be24077a0809aea7d4dc945e5c10a3ee058154c50048fa0ee130c936b0e7335614a6dd90ad57f54ca79fb` |
-| `S` sig (DER + `0x83`) | `304402206db331b2bba37bc22b8ceaf3c199843a1f268061019be24077a0809aea7d4dc9022045e5c10a3ee058154c50048fa0ee130c936b0e7335614a6dd90ad57f54ca79fb83` |
+| HTLC-success tx (unsigned) | `02000000013209bd81c6d589188963b0adf7da4715d4d6bdaf42beda58c485ae8660ec8b0003000000000100000001e203000000000000220020b077728ee1d99fd5ca43844e80580f0e7e32904c4a1192873fee9913e005ce1100000000` |
+| HTLC-success txid | `636b7d01262b28f2e44e7b1cd129d8de41d2cb9a0e8eec2fedc09f2aee6556da` |
+| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `fe6bc98b88c37b3bb5cf9645036a7db4a15ab19f8956962a1b3f58c6c83c7011` |
+| `S` sig (compact) | `ac95917428db33b92d86e3c2f77dff21624ee884c00ca60612b79de18e326ae444c2568a9b7195976fe2c65cf8b3425a82db4402e99a257c5d5f539f85a9da53` |
+| `S` sig (DER + `0x83`) | `3045022100ac95917428db33b92d86e3c2f77dff21624ee884c00ca60612b79de18e326ae4022044c2568a9b7195976fe2c65cf8b3425a82db4402e99a257c5d5f539f85a9da5383` |
 
 ### A.3.3 `C_3`, commitment number 45, vouchers 1..3
 
@@ -346,7 +325,7 @@ rules: zero fee, input `nSequence = 1`):
 | `per_commitment_point_R[45]` | `02cb70d6bbd9e541cc97080c21554bb5bad9a97106bd8cddf87e58fff251843f52` |
 | obscured commitment number | `0xb9c570f08184` |
 | commitment fee (paid by S) | 4100 sat |
-| txid | `237d464440a2ad7b5e80f10307cdcee57545c0b51fcde5619c56c170285f9c8b` |
+| txid | `047a2710591e3c6b4dacd9e72999e748297375636a4628cc6f58b87e00b15e17` |
 
 Derived keys on this commitment (holder = `R`):
 
@@ -368,18 +347,18 @@ Outputs (BOLT 3 order):
 | 3 | voucher_1 (received HTLC) | 994 | `0020ff4a1c5e58c03b66de6eb3898a569b108e6f041d623e7c8aa59a0177e2a27030` |
 | 4 | voucher_3 (received HTLC) | 49749 | `002083027f3f87e89640917886cdf2d4e6b82517d8b515b83dc47fb7016530e3d0e7` |
 | 5 | to_local (R) | 3000000 | `00204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b838` |
-| 6 | to_remote (S) | 6943951 | `0020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a` |
+| 6 | to_remote (S) | 6943950 | `0020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a` |
 
 Transaction (unsigned funding input, as signed by both parties):
 
 ```
-0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980074a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb399422020000000000002200202ba955f11e6e7c7e0a6be9faa08f6d2f30df75c93848a1915c344829a5564d98e203000000000000220020ff4a1c5e58c03b66de6eb3898a569b108e6f041d623e7c8aa59a0177e2a2703055c200000000000022002083027f3f87e89640917886cdf2d4e6b82517d8b515b83dc47fb7016530e3d0e7c0c62d00000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b838cff4690000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8481f020
+0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980074a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb399422020000000000002200202ba955f11e6e7c7e0a6be9faa08f6d2f30df75c93848a1915c344829a5564d98e203000000000000220020ff4a1c5e58c03b66de6eb3898a569b108e6f041d623e7c8aa59a0177e2a2703055c200000000000022002083027f3f87e89640917886cdf2d4e6b82517d8b515b83dc47fb7016530e3d0e7c0c62d00000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b838cef4690000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8481f020
 ```
 
 `S` commitment signature (`ff_settlement.commitment_sig`):
 
-- compact: `596641c99683b7484dbdf98f6c64df41e5a40d562ae66c767231ff9d5bd2d6e67594260fa308e1cfffdd6c7f570fc5fad922a2a3f0103f9800aa3b98b976725d`
-- DER + `SIGHASH_ALL`: `30440220596641c99683b7484dbdf98f6c64df41e5a40d562ae66c767231ff9d5bd2d6e602207594260fa308e1cfffdd6c7f570fc5fad922a2a3f0103f9800aa3b98b976725d01`
+- compact: `b1e341db4507ed2a2eed01ca45829af1fd3cb09af3177291fd1c29366c862f824b8379870a2e32bf3248ac666ef76d59aed8a7c8d2b032c3656eabacd31c40ee`
+- DER + `SIGHASH_ALL`: `3045022100b1e341db4507ed2a2eed01ca45829af1fd3cb09af3177291fd1c29366c862f8202204b8379870a2e32bf3248ac666ef76d59aed8a7c8d2b032c3656eabacd31c40ee01`
 
 `S` HTLC signatures (`ff_settlement.htlc_sigs`, 3 sigs, BOLT 3 output order,
 `SIGHASH_SINGLE|ANYONECANPAY` over the HTLC-success transaction, anchor
@@ -390,33 +369,33 @@ rules: zero fee, input `nSequence = 1`):
 | Field | Value |
 |---|---|
 | HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a91420d99eec924ebefe841f651d91464ad2373b34a18763ac6721034c36d000352fa6253967b8b1744cbd73c7e745dce4228f38a463d00f6a5c91b17c8201208763a914b43e1b38138a41b37f7cd9a1d274bc63e3a9b5d188527c2102fc9e53b3294ec2cad228ec6009e23d7b58865f558095301d6abc081c1b59c3f752ae67750300350cb175ac6851b27568` |
-| HTLC-success tx (unsigned) | `02000000018b9c5f2870c1569c61e5cd1fb5c04575e5cecd0703f1805e7bada24044467d230200000000010000000122020000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
-| HTLC-success txid | `d150284e54e33db780a1280f99b60682ed9970e058eaa4ca2da02714ce21ba64` |
-| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `2cdd0e85ff92a1f50e75849b3c6044f99feebf97b9f4577b1334dbeadcf5f76f` |
-| `S` sig (compact) | `8371216a9a675a69592d08dbc5bfbed45c26bef7394a1a49dbe0c98fcc23236e13e03c2a16938658149142d820efb8b2cca9d1fb4c0a5e6935a99791baae7034` |
-| `S` sig (DER + `0x83`) | `30450221008371216a9a675a69592d08dbc5bfbed45c26bef7394a1a49dbe0c98fcc23236e022013e03c2a16938658149142d820efb8b2cca9d1fb4c0a5e6935a99791baae703483` |
+| HTLC-success tx (unsigned) | `0200000001175eb1007eb8586fcc28466a6375732948e79929e7d9ac4d6b3c1e5910277a040200000000010000000122020000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
+| HTLC-success txid | `fda9ebc2090f3a28be0f1cb0502823dcfe53dc346eae3c4affb557145c765c3b` |
+| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `9d5411705696d693126ae7544221840f360d8c404c8381d60fba3793d8647681` |
+| `S` sig (compact) | `80ac3f2153d8c109cc2aeef5e0d52e8e08bd2a741fd2ab48a6f0e8f7eea8c0ea160e951bf628bad798fc6f6a33f5f9650356ed0c76edd0f4676914580cd920db` |
+| `S` sig (DER + `0x83`) | `304502210080ac3f2153d8c109cc2aeef5e0d52e8e08bd2a741fd2ab48a6f0e8f7eea8c0ea0220160e951bf628bad798fc6f6a33f5f9650356ed0c76edd0f4676914580cd920db83` |
 
 #### htlc_sig for voucher 1 (output 3, 994 sat)
 
 | Field | Value |
 |---|---|
 | HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a91420d99eec924ebefe841f651d91464ad2373b34a18763ac6721034c36d000352fa6253967b8b1744cbd73c7e745dce4228f38a463d00f6a5c91b17c8201208763a9149dac0ba2874023dcb252d34da5934a193b73697e88527c2102fc9e53b3294ec2cad228ec6009e23d7b58865f558095301d6abc081c1b59c3f752ae67750300350cb175ac6851b27568` |
-| HTLC-success tx (unsigned) | `02000000018b9c5f2870c1569c61e5cd1fb5c04575e5cecd0703f1805e7bada24044467d2303000000000100000001e2030000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
-| HTLC-success txid | `ae50d79b8b7c6c7a6af82d6dde8c8b1c27597008cfb8424e965e7232afec47d3` |
-| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `f1b9025a70d62b736102e5ed026b2fae1b656d840f59369e589164a088bd2c9f` |
-| `S` sig (compact) | `196d0d67f5b688ad7cf4c866efde492253e8e7af20436c5557c7c7c6c86f0de36c4c17ebb10aec4d6535aa841c3460a5c9a20ad5f67282e6c89438eff29e7caf` |
-| `S` sig (DER + `0x83`) | `30440220196d0d67f5b688ad7cf4c866efde492253e8e7af20436c5557c7c7c6c86f0de302206c4c17ebb10aec4d6535aa841c3460a5c9a20ad5f67282e6c89438eff29e7caf83` |
+| HTLC-success tx (unsigned) | `0200000001175eb1007eb8586fcc28466a6375732948e79929e7d9ac4d6b3c1e5910277a0403000000000100000001e2030000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
+| HTLC-success txid | `6e966eb7b92dbc531c84ef32d0839b3c5f5975e21f8b32d53f1190cf271a0130` |
+| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `0af119be212636085911a04ced9ba4dec2db95579593b29b66b811fd9be1685d` |
+| `S` sig (compact) | `d8cc83eeb789a77c8c5a69d31523f938f256a3e9a281c7060f7866e4184f7cc6498055c81c7be6bbb06cc8d51d951a15a48aa6aa357817994d4532ce0c820ad0` |
+| `S` sig (DER + `0x83`) | `3045022100d8cc83eeb789a77c8c5a69d31523f938f256a3e9a281c7060f7866e4184f7cc60220498055c81c7be6bbb06cc8d51d951a15a48aa6aa357817994d4532ce0c820ad083` |
 
 #### htlc_sig for voucher 3 (output 4, 49749 sat)
 
 | Field | Value |
 |---|---|
 | HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a91420d99eec924ebefe841f651d91464ad2373b34a18763ac6721034c36d000352fa6253967b8b1744cbd73c7e745dce4228f38a463d00f6a5c91b17c8201208763a9148a486ff2e31d6158bf39e2608864d63fefd09d5b88527c2102fc9e53b3294ec2cad228ec6009e23d7b58865f558095301d6abc081c1b59c3f752ae67750300350cb175ac6851b27568` |
-| HTLC-success tx (unsigned) | `02000000018b9c5f2870c1569c61e5cd1fb5c04575e5cecd0703f1805e7bada24044467d230400000000010000000155c20000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
-| HTLC-success txid | `fb56f5d6dbf4bd98687dcbf941550daef9c5a858c70bf5f3ccbf1023a5ee7bcf` |
-| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `a2b64c0ee2d9bd22ff1efa71662e793ebdb63265ad7d9ba0651f594530571323` |
-| `S` sig (compact) | `c8b824d74c765f51e2fa4dbb737fad2337dcf66ddfefa6fc7a5467543108574a01ce87211237d0f12015602bda4451b6615c95b4e9d4224371811e828f76b50a` |
-| `S` sig (DER + `0x83`) | `3045022100c8b824d74c765f51e2fa4dbb737fad2337dcf66ddfefa6fc7a5467543108574a022001ce87211237d0f12015602bda4451b6615c95b4e9d4224371811e828f76b50a83` |
+| HTLC-success tx (unsigned) | `0200000001175eb1007eb8586fcc28466a6375732948e79929e7d9ac4d6b3c1e5910277a040400000000010000000155c20000000000002200204ebfb56ddcb89f093cc4adab0b1eb21bfd1e2d5325ca49474b7a490f1f55b83800000000` |
+| HTLC-success txid | `80d6895bb316ba0c610b925d0b2c37cc42792b755c68a483d45a91e4a3446d70` |
+| sighash (`SINGLE\|ANYONECANPAY` = `0x83`) | `6b6c17110090ad866c9de1967583141308759d735242141f15fc7bb535477322` |
+| `S` sig (compact) | `cdc6e4dab9c5c3558993a3f6043bfac9c0f136ac15d024357614f7f3813865d8637bb241ee89063182e613178c46a19a818b5065829985ccca0efaf5ba039f7d` |
+| `S` sig (DER + `0x83`) | `3045022100cdc6e4dab9c5c3558993a3f6043bfac9c0f136ac15d024357614f7f3813865d80220637bb241ee89063182e613178c46a19a818b5065829985ccca0efaf5ba039f7d83` |
 
 ## A.4 Verification performed by the generator
 
@@ -444,8 +423,7 @@ emit vectors if any fails):
    the same txid.
 8. For every `C_i`: `to_remote` equals
    `floor((S balance msat − base fee msat − anchors msat) / 1000)`, the BOLT 3
-   millisatoshi rounding rule of FFOR §8. This assertion is what the errata at
-   the head of this file refers to; it currently fails on `C_2`/`C_3`.
+   millisatoshi rounding rule of FFOR §8.
 
 Additionally (out-of-band, not a generator assertion): the `C_0..C_3` hex
 and the HTLC-success transactions were decoded with Bitcoin Core 29.1

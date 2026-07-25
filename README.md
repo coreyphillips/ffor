@@ -19,7 +19,7 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 | File | What it is |
 |---|---|
 | [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8.1): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
-| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded). **`C_2`/`C_3` carry known errata, see the note at the head of the file** |
+| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded), regenerated 2026-07-25 against the corrected BOLT 3 rounding rule |
 | [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
 
 ## Reference implementation
@@ -77,10 +77,10 @@ Draft v0.8.1, an errata release over v0.8. Wire details reflect what the prototy
 actually implements; message type and feature bit numbers are provisional pending bLIP
 assignment. **Variant D and §5.1 are specified but not yet prototyped** (M8, §15.2).
 
-§17 lists what changed and what it breaks. The one item that reaches published
+§17 lists what changed and what it breaks. The one item that reached published
 artefacts: §8's millisatoshi rounding rule was the inverse of BOLT 3's, so `C_2` and
-`C_3` in the test vectors carry a `to_remote` one satoshi high and need regenerating
-against a corrected commitment builder.
+`C_3` in the test vectors carried a `to_remote` one satoshi high. The reference
+implementation and the vectors have both been corrected.
 
 ## Prior art
 
