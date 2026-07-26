@@ -41,9 +41,10 @@ bitcoind:
   confirmed exact on-chain.
 - **M6**, liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
   splice-on-return, and a 21-case crash matrix covering every protocol arrow.
-- **M7**, hardening the tower into a service: durable store and restart contract,
-  BOLT-8 tower transport (spec Appendix C), role separation and node-embedded
-  breach-watch, and gossip-based tower discovery.
+- **M7**, hardening the tower into a service: durable store and restart contract, a
+  swappable transport boundary, role separation and node-embedded breach-watch, and
+  gossip-based tower discovery. The spec's Appendix C BOLT-8 wire format was drafted
+  against that boundary but is not implemented.
 
 Plus **M8.8**, a two-test characterization of the §13.7 hash-reuse vector, which is
 implemented and green but gates nothing.
