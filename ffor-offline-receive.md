@@ -4,10 +4,11 @@
 
 - Status: Draft v0.8.1 (2026-07-25), hardened by computed test vectors (Appendix A) and
   a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
-  Variant B tower and its durable transport, the full escape lifecycle, bLIP-51 lease
+  Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
   integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
   script and weight tables confirmed exact on regtest); wire details below reflect what
-  the prototype actually implements
+  the prototype actually implements, with Appendix C the one exception (see its status
+  note)
 - **v0.8.1 is an errata release.** It corrects §8's millisatoshi rounding rule to
   BOLT 3's (the previous rule made byte-exact reconstruction fail by one satoshi;
   Appendix A has been regenerated), forbids the §7.2 `H_1` binding in Variant D
@@ -1382,8 +1383,9 @@ handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
 ### 15.1 M7: hardening the tower into a deployable service
 
 M4 proved a tower can gate settlement. M7 turned that prototype into something that
-survives operations, and its results are normative in §9.4, §11.3 and Appendix C rather
-than being confined to this list.
+survives operations, and its results are normative in §9.4 and §11.3 rather than being
+confined to this list. Appendix C was drafted alongside it but not built (see its
+status note).
 
 1. **M7.0: Durable store and restart contract.** `T` persists the full provisioning
    bundle, not just the settlement record, and rehydrates every epoch on restart with no
@@ -1391,9 +1393,12 @@ than being confined to this list.
    serves released preimages idempotently, still rejects a differing package for an
    already-released `seq`, and still verifies and releases the *next* `seq`. Normative
    in §9.4's restart contract.
-2. **M7.1: Tower transport.** `T` reached as a directly-dialed BOLT-8 peer, with the
-   provision / release / fetch request-response pairs. Gate: all three operations over a
-   real Noise session, correlated by `request_id`. Normative in **Appendix C**.
+2. **M7.1: Tower transport boundary.** The tower is reached through an abstract
+   provision / release / fetch client rather than being wired into the channel, so a
+   transport can be swapped without touching tower logic. Gate: the same tower serves
+   both an in-process loopback (tests) and an out-of-process transport (the tower
+   example). **Appendix C's BOLT-8 wire format was written against this boundary but
+   is not implemented**; see the status note there.
 3. **M7.2: Role separation and node-embedded breach-watch.** A tower running inside a
    full node refuses epochs where it is `S` (and should refuse where it is `R`), and
    arms funding-outpoint watches from durable state on restart. Gate: provisioning
@@ -1663,13 +1668,28 @@ larger justice transaction; a real penalty sweep amortizes overhead across all o
 ## Appendix C: tower transport (provisioning / authentication wire format)
 
 Variant B needs `R` and `S` to reach the tower `T` over an authenticated channel.
-This appendix specifies the **direct BOLT-8** transport the reference implementation
-uses (beignet M7.1): `T` is reached as a directly-dialed BOLT-8 peer
-(`nodeId@host:port`). Onion-message indirection, for the case where `S` should not
-learn `T`'s network identity, is an optional privacy upgrade left to a future revision.
-The three logical operations (§9.4), provision, release and fetch, are carried as
-request/response pairs of custom, odd (ignorable) peer messages. Numbers are provisional
-pending bLIP assignment; all multi-byte integers are big-endian.
+This appendix specifies a **direct BOLT-8** transport for that purpose: `T` is reached
+as a directly-dialed BOLT-8 peer (`nodeId@host:port`). Onion-message indirection, for
+the case where `S` should not learn `T`'s network identity, is an optional privacy
+upgrade left to a future revision. The three logical operations (§9.4), provision,
+release and fetch, are carried as request/response pairs of custom, odd (ignorable)
+peer messages. Numbers are provisional pending bLIP assignment; all multi-byte integers
+are big-endian.
+
+**Implementation status (2026-07-26): this appendix is specified but not prototyped.**
+Unlike the rest of this document, it does not describe what the reference
+implementation does. beignet reaches `T` through an abstract three-method client
+(provision / release / fetch) with an in-process loopback for tests and a TCP
+JSON-lines transport in its tower example; message types 55031 to 55041 exist nowhere.
+Read this appendix as the interop target for a third-party tower, not as a description
+of running code, and see §11.3's tower discovery, which presupposes it. Two
+consequences follow, and neither is theoretical while the appendix is unbuilt:
+
+- C.2's access-control layer assumes an authenticated peer identity. A transport
+  without one leaves `ff_tower_provision` with **no** authentication of any kind, since
+  the §9.4 bundle carries no signature (release and fetch are separately signed).
+- `R` cannot in practice select a tower from gossip (§11.3) without a dial protocol
+  both sides implement.
 
 ### C.1 Messages
 
