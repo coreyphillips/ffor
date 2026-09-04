@@ -692,7 +692,7 @@ replay, disconnect and restart.
 | `NEGOTIATING → VOUCHERS_COMMITTED` | both (variant-specific, §9.5.1 / §7.3, §7.4, §9.4) | the stock BOLT 2 round (D) or the FFOR setup messages (A, B) | the stock channel state (D); the escape set and tower ack (A, B) | ordinary updates still legal until `stfu` |
 | `VOUCHERS_COMMITTED → ACTIVATING` | `R` (`stfu` then `ff_activate`) | `T_setup`, `H_book`, `H_commit` | nothing new on `R` (it may re-send) | none: quiescent |
 | `ACTIVATING → ACTIVE` | `S` (`ff_activate_ack`) | `H_act` | `S`: `ACTIVE` + `H_act` + book, before sending. `R`: same, on receipt, before exposing any invoice | delegated settlement (§9.2, §9.5.1) only. No `update_*`, `commitment_signed`, `update_fee`, `stfu`, splice or close negotiation from either side |
-| `{NEGOTIATING, VOUCHERS_COMMITTED, ACTIVATING} → ABORTED` | either (`ff_abort`), or implicit on disconnect or timeout | `T_setup` or `T_init` | `ABORTED` for the `epoch_id` | ordinary; in D the vouchers are failed per §9.5.1 |
+| `{NEGOTIATING, VOUCHERS_COMMITTED, ACTIVATING} → ABORTED` | either (`ff_abort`), or implicit on disconnect or timeout, except the acknowledgement-loss window below: an `R` in `ACTIVATING` whose `S` reestablishes `ACTIVE` with a matching `H_act` completes `ACTIVATING → ACTIVE` instead | `T_setup` or `T_init` | `ABORTED` for the `epoch_id` | ordinary; in D the vouchers are failed per §9.5.1 |
 | `ACTIVE → DRAINING` | `R` (`ff_close`), acknowledged by `S` (`ff_close_ack`) | `H_act`, then `H_act` + bitmap (+ preimages) | `S`: `DRAINING` + bitmap before sending. `R`: `DRAINING` + ack on receipt | only `update_fulfill_htlc` / `update_fail_htlc` for the vouchers, and the `commitment_signed` / `revoke_and_ack` they need (D); the §11.1 step 6 conversions (A, B). No new `update_add_htlc`, `update_fee`, `stfu` or splice from either side |
 | `DRAINING → CLOSED` | implicit: the last voucher irrevocably resolved on both commitments | nothing | `CLOSED` | ordinary |
 
@@ -720,7 +720,15 @@ retransmission, since the transport is reliable.
 Disconnect and restart. Before `ACTIVE`, **a disconnect aborts the setup** on both
 sides (reason 6), because BOLT 2 ends quiescence on disconnect and nothing before
 `ACTIVE` is worth resuming; a Variant D voucher round survives as ordinary channel
-state and is unwound per §9.5.1. From `ACTIVE` on, the state is durable and a
+state and is unwound per §9.5.1. The one window that is preserved is
+**acknowledgement loss**: `S` persists `ACTIVE` before its `ff_activate_ack` leaves, so
+if the connection drops with `S` in `ACTIVE` and `R` still in `ACTIVATING`, `S` MUST
+NOT abort (it never aborts from `ACTIVE`), MUST report `ACTIVE` with `H_act` on
+reestablish and retransmit the ack, and `R` MUST complete `ACTIVATING → ACTIVE` on
+receiving it with a matching `H_act`. An `R` in `ACTIVATING` whose `S` reports
+anything else aborts (reason 6). An `R` MUST therefore keep its `ACTIVATING` record
+across a disconnect until the reestablish answers, which is the only pre-`ACTIVE`
+state a disconnect does not erase. From `ACTIVE` on, the state is durable and a
 disconnect changes nothing: `channel_reestablish` carries TLV 55001 (§11.1) with the
 state and `H_act`, the two sides compare, and the retransmission rules above resolve
 every crash window. The BOLT 2 `next_commitment_number` / `next_revocation_number`
@@ -756,8 +764,8 @@ settle and a witness will not record.
 
 Deadlines, all in one place:
 
-- `D < T_exp − claim_margin`, with `claim_margin ≥ reconcile_margin` (§7.1, recommended
-  `≥ 1008` blocks): `R` needs time after admission stops to return, drain, or enforce.
+- `D ≤ T_exp − claim_margin`, with `claim_margin ≥ reconcile_margin` (§7.1, recommended
+  `≥ 1008` blocks; `T_exp − D = 1008` exactly is therefore conforming): `R` needs time after admission stops to return, drain, or enforce.
 - Every invoice `expiry` MUST be no later than a conservative wall-clock estimate of
   height `D`. "Conservative" means erring early: an implementation MUST assume no more
   than 8 minutes per remaining block and SHOULD subtract a further margin. An
@@ -1308,8 +1316,9 @@ or treat the add as mismatching.
 
 **Bounds on `K`.** `K ≤ R`'s `max_accepted_htlcs` (vouchers are `S`-offered, so `R`'s
 limit binds), `K ≤ 483`, `Σ d_k ≤ R`'s `max_htlc_value_in_flight_msat`, every `d_k ≥`
-the channel's `htlc_minimum_msat` and above the §8 dust floor, both parties' reserves
-and the funder's fee-spike obligation of §7.6 satisfied with all `K` outputs present.
+the channel's `htlc_minimum_msat` and above the §8 dust floor, `S`'s reserve, `R`'s
+reserve only when `R` is the funder (§8: an `R` that did not fund may hold zero), and
+the funder's fee-spike obligation of §7.6, all satisfied with all `K` outputs present.
 All of these are checked at step 2; a book that fails any of them is refused with
 `ff_abort` (reason 2 or 3) and never reaches step 3.
 
@@ -1948,9 +1957,15 @@ per-commitment point for `n0 + 2`, which `R` otherwise could not obtain before s
 the catch-up commitment in step 2. Mismatch rules: an `S` reporting no epoch, or `ABORTED`, while `R` is before
 `ACTIVE` means setup never completed and `R` MUST discard (§7.5.5); conversely, if `R` reports no epoch
 while `S` has `last_seq > 0`, `S` MUST retain the epoch and respond `ff_error`: `S`
-holds voucher obligations and MUST NOT forget them; `S` MAY discard only at
-`last_seq == 0`. Symmetrically, once settlements exist **neither** side may discard on
-a TLV-less reestablish: `R`'s packages and preimages are its only claim on the
+holds voucher obligations and MUST NOT forget them; in Variants A and B `S` MAY
+discard only at `last_seq == 0`. In Variant D `last_seq` is always 0 and carries no
+retention meaning: retention there is decided by state alone. From the moment either
+side persisted `ACTIVE`, **neither** side may discard the epoch on any reestablish,
+whatever the peer reports and whether or not any slot was settled, because the
+vouchers are real HTLCs and the book is the only record of which hash is which; the
+epoch ends only through `DRAINING → CLOSED` or on-chain. Before `ACTIVE` the
+disconnect-aborts rule of §7.5.5 applies. Symmetrically, in A and B, once settlements
+exist **neither** side may discard on a TLV-less reestablish: `R`'s packages and preimages are its only claim on the
 credited vouchers, so an `S` that stops sending the TLV after settlements is treated
 as misbehaving (`R` enforces on-chain per step 6); the §7.5 discard rule applies only
 while `R` holds zero settlement evidence. `S`'s `last_seq` is a **lower bound** on the
@@ -2030,10 +2045,13 @@ completed or failed every in-flight delegated HTLC (no other updates are legal i
    input 0 (outpoint + witness), never by txid.
 
 `ff_error` (type 55023, body `[u16: len][len: data]` after the standard header, BOLT 1
-error style) signals a protocol violation. Before `ACTIVE` it is followed by, and has
-the effect of, `ff_abort` (reason 7); during `ACTIVE` and `DRAINING` the channel falls
-back to on-chain enforcement rather than aborting (§7.5.1: there is no abort from
-`ACTIVE`).
+error style) signals a protocol violation and nothing else. A valid `ff_init`,
+`ff_activate` or book that a peer declines is answered with `ff_abort` alone (reason
+2, 3 or 4) and no `ff_error`. Before `ACTIVE`, an `ff_error` MUST be followed by
+`ff_abort` (reason 7) from the same sender, and the receiver records the abort's
+reason, never a reason of its own inferred from the `ff_error`; during `ACTIVE` and
+`DRAINING` the channel falls back to on-chain enforcement rather than aborting
+(§7.5.1: there is no abort from `ACTIVE`).
 
 ### 11.2 Edge cases
 
@@ -2753,8 +2771,9 @@ abort-after-round cases; §13.7 retitled "bounded, not closed" with §13.7.1 sta
 exactly what the distribution rule does and does not do (issue #20), §7.3's
 distribution table, §12.1 and §12.4 aligned; §15.2's M8.1 and M8.3 gates restated
 against §9.5.1 and §7.5. Appendix D (`ffor-variant-d-vectors.md`) carries the
-transcript and both-view commitment vectors for §9.5.1: five scenarios (K = 1; K = 3
-with S funding; K = 3 with R funding; the 546,000 msat dust boundary; K = 483), every
+transcript and both-view commitment vectors for §9.5.1: six scenarios (K = 1; K = 3
+with S funding; K = 3 with R funding; the 546,000 msat dust boundary; K = 483; K = 1
+with S funding and R holding nothing), every
 signed message as wire bytes, every hash of §7.5.2, both commitment views with all
 second-stage signatures, and all four force-close spends of voucher 1, computed with
 beignet's builder and verified both ways. Its generation fixed the signing and
@@ -2788,7 +2807,18 @@ the secrets `R` already holds and again when the voucher round reveals
 `per_commitment_secret_S[n0]`; §8 bounds `R`'s reserve only when `R` is the funder;
 §7.5.5's 60-second timeout may surface as BOLT 2's mandated disconnect (reason 6);
 §7's epoch-id uniqueness covers a refused `ff_init`; §11.1 states `last_seq = 0` in
-Variant D.
+Variant D and scopes the `last_seq` retention rule to A and B, with Variant D
+retention decided by state alone from `ACTIVE` on. Review of the above added: the
+acknowledgement-loss window is the one pre-`ACTIVE` state a disconnect preserves
+(§7.5.5); `D ≤ T_exp − claim_margin` is non-strict, so `T_exp − D = 1008` conforms
+(§7.5.6); §9.5.1's bounds carry §8's conditional reserve; `ff_error` never implies an
+abort reason of its own (§11.1); Appendix D gains the S-funded, R-holds-nothing
+scenario and asserts `R`'s reserve only when `R` funds.
+
+Bytes on the wire are unchanged by this section; what it changes is behaviour: which
+reestablish outcomes abort, how the bitmap is read, which abort reason is recorded,
+and what `last_seq` means. An implementation of v0.9 before these errata interoperates
+on every message and can disagree on those four points.
 
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
