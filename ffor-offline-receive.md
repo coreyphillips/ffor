@@ -2,7 +2,7 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.9 (2026-09-04), hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.9.1 (2026-09-04), hardened by computed test vectors (Appendix A) and
   a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
   integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
@@ -39,6 +39,13 @@
   complete **before** either side sends `stfu`, activation happens under quiescence as
   an FFOR state transition and not a channel update, and the durable `ACTIVE` freeze
   outlives the quiescence that BOLT 2 ends on disconnect. See §17.3.
+- **v0.9.1 adds the D-R receipt-witness profile** (issue #24): §9.6 and Appendix F.
+  Witnesses `R` chooses on the payment path store an encrypted, signed preimage record
+  before they let the payer's success propagate, authorized under per-epoch keys with
+  `R`'s node id nowhere, so `R`'s recovery set gains N agents that hold information
+  and no money. The claim is stated in full in §9.6.1 with its limits: bounded
+  return, every witness learns the preimage, path enforcement only against an honest
+  `S`. D1-WR is recorded as deferred (§13.8). See §17.4.
 - **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
@@ -177,6 +184,14 @@ at the cost of moving `R`'s recourse from a chosen agent to the payers themselve
 A, B and D share all setup messages and differ only in who generates payment hashes,
 when preimages are released, and whether vouchers are minted during the epoch or at
 setup.
+
+**D-R** (§9.6) is Variant D plus receipt witnesses `R` chooses on the payment path,
+each storing an encrypted preimage record before it lets the payer's success propagate.
+It moves `R`'s recovery set from "`S` and strangers" to "`S`, strangers, and N agents of
+`R`'s that hold information and no money", and it is the profile this specification
+recommends for a wallet that wants a standard-payer offline receive with trustless
+funds safety and one-of-N receipt recovery. It does not change either "impossible" cell
+above.
 
 The row that matters most is the pair `S settles upstream but withholds the credit` and
 `R fabricates credit`: **no variant sets both to "impossible" without an always-online
@@ -345,6 +360,7 @@ and the signature.
 | TLV 3: `tower_node_id` | 33 | Variant B only |
 | TLV 5: `tower_uri` | var | Variant B only: how `S` reaches `T` |
 | TLV 9: `voucher_amounts_msat` | K×u64 | fixed-amount profile: `d_1…d_K`, one per hash, in hash-set index order. REQUIRED in Variant D. In Variants A and B its presence selects the fixed-amount profile and its absence the amountless profile (§7.6) |
+| TLV 13: `witness_peers` | u16 + count×33 | D-R (§9.6.3): node ids of the peers from which delegated HTLCs may arrive; `S` MUST fail a delegated HTLC arriving from any other peer. Absent: no restriction |
 | `signature` | 64 | `R`'s node-key sig (proves `R` requested these terms, including every `d_k`) |
 
 Pre-sharing `R`'s per-commitment *points* is safe: points are routinely disclosed one
@@ -1447,6 +1463,250 @@ plain Variant D (§9.5.1), where `S` generates the preimages and no tower exists
 
 ---
 
+### 9.6 D-R: the receipt-witness profile (normative)
+
+Plain Variant D leaves `R` with a one-of-N recovery set, `{S, the payers, any mailbox}`
+(§9.5.3), in which every member is either the party that might withhold or a stranger.
+D-R adds members `R` chooses: **receipt witnesses**, routing nodes on the invoice's
+path before `S` that store the preimage durably before they let the payer's success
+propagate. A witness holds information, never money: no channel keys, no signed
+commitment of `R`'s, no broadcast kit, no ability to move a satoshi. The channel is
+unchanged from §9.5; D-R is a profile over it.
+
+#### 9.6.1 The claim, stated in full
+
+> FFOR D-R provides payer-final, non-custodial offline receive for precommitted
+> fixed-amount slots. A conforming payer using an authorized witness-bearing path sees
+> ordinary Lightning success. Each conforming on-path receipt witness stores an
+> encrypted preimage record before propagating fulfilment. `R` can enforce or
+> reconcile the voucher if at least one authorized record remains retrievable before
+> the claim deadline. The profile does not provide indefinite offline recovery or
+> cryptographic protection against same-hash reuse.
+
+For the path the invoice declares:
+
+```
+payer final success
+  -> R already holds an enforceable voucher for (H_k, d_k)          (§9.5.1, §9.5.3)
+  -> every conforming receipt witness on the path saw t_k
+  -> at least one honest durable witness makes t_k retrievable by R
+```
+
+and for `S`:
+
+```
+R can activate voucher k
+  -> S revealed t_k
+  -> S had a matching irrevocably committed inbound HTLC             (§9.5.2)
+```
+
+This is trustless funds safety with **conditional liveness**, not unconditional data
+availability. Its honest limits, each normative text elsewhere:
+
+- **Bounded return.** `R` MUST retrieve a record and reconcile or force-close before
+  `T_exp − claim_margin` (§7.5.6). The window is a parameter `R` chooses and `S` prices
+  through locked liquidity; §5.1's long `to_self_delay` lets it be long, but it ends.
+  An `R` that may never return needs a terminal construction that closes the channel
+  (D1-WR, deferred: §13.8), not this profile.
+- **Every witness learns plaintext `t_k`.** A witness can settle a later same-hash HTLC
+  itself and never forward it to `S`; reuse is bounded by who holds the invoice, not
+  prevented (§13.7.1).
+- **Path enforcement is not cryptographic against `S`.** An honest `S` refuses
+  delegated HTLCs that did not arrive from a designated witness (§9.6.3), but a
+  malicious `S` already holds `t_k` after the first settlement and can accept the same
+  hash on any channel. The defensible statement is limited to a conforming payer using
+  one of the signed paths.
+- **Availability of the witnesses is `R`'s assumption.** If every witness deletes,
+  loses or withholds its record and no payer can be reached, an offline `R` cannot
+  distinguish a paid slot from an unpaid one. `R` enlarges N by provisioning more
+  witnesses; nothing else substitutes.
+- **A witness still has operational exposure**: storage it promised, bandwidth, the
+  privacy of what it observes, and denial of service. §9.6.7 bounds them; it does not
+  remove them.
+
+#### 9.6.2 Roles and objects
+
+| Term | Meaning |
+|---|---|
+| `W` | A receipt witness. Any node on the invoice path before `S` that implements this section. There MAY be several per epoch; each is independent. The issuer of issue #25 is a natural `W`. |
+| mailbox | One witness's store for one epoch, named by a random 32-byte `mailbox_id`. Unlinkable to the epoch, to `R`'s node id, and to any other witness's mailbox. |
+| manifest | What `R` gives `W` at provisioning: the book, `H_act`, and the keys under which records are encrypted and fetched (§9.6.4). |
+| record | One witness's signed, receiver-encrypted statement that it saw `t_k` (Appendix F.2). |
+| `fetch_key` | A fresh secp256k1 keypair per `(W, epoch)`, generated by `R`. Its public half authorizes the manifest and every fetch; `R`'s node id appears nowhere. |
+| `enc_key` | A fresh secp256k1 public key per epoch, generated by `R`, to which every record body is encrypted (Appendix F.3). |
+| `claim_margin` | §7.5.6: the blocks `R` reserves between admission close and `T_exp` to return, fetch, drain or enforce. |
+
+Every witness object binds to `H_act`. A witness that has not acknowledged the epoch's
+`H_act` MUST NOT record for it, and `R` MUST NOT expose an invoice before every
+witness it relies on has acknowledged (§7.5.5).
+
+#### 9.6.3 Path requirements and `S`'s side
+
+- Every invoice `R` signs for a D-R epoch MUST route through at least one provisioned
+  witness immediately before `S`, or through a chain of them ending at `S`. BOLT 12
+  blinded payment paths are the vehicle (a conforming payer cannot leave them; the
+  aggregate fee and CLTV are computed per §7.6); a BOLT 11 route hint is advisory and a
+  payer MAY ignore it, so BOLT 11 D-R invoices carry only the guarantee that a
+  *conforming* payer follows the hint.
+- `ff_init` TLV 13 `witness_peers` (`u16 count`, `count × 33` node ids) names the peers
+  from which delegated HTLCs may arrive. `S` MUST fail upstream (§8 encoding) a
+  delegated HTLC that arrives over a channel to any other peer. This is an honest-`S`
+  guard: it stops a conforming payer's mistaken route from settling without a record,
+  and it does nothing against an `S` that wants to settle anyway.
+- `S` is otherwise unchanged from §9.5.1: one-shot slot state, `ff_close_ack` with
+  bitmap and preimages, no message to anyone during the epoch. `S` MAY be told nothing
+  about the witnesses beyond TLV 13.
+- Witness hops charge ordinary forwarding fees, folded into the blinded path's
+  aggregate `blinded_payinfo` per §7.6. None of them changes `d_k`.
+
+#### 9.6.4 Provisioning
+
+After `ACTIVE` and before exposing any invoice, `R` sends each witness
+`ff_witness_provision` (Appendix F.1) carrying the manifest:
+
+```
+manifest = [1: version = 1][1: profile = 1 (D-R)]
+           [32: mailbox_id]
+           [32: T_setup][32: H_commit][4: epoch_start_height][32: H_act]
+           [33: fetch_pubkey][33: enc_pubkey]
+           [4: retention_until][1: min_receipts]
+           [2: book_len][book_len: book]                (§7.5.3, the whole book)
+           [64: manifest_sig]
+```
+
+`manifest_sig` is a compact ECDSA signature under `fetch_pubkey` over
+`SHA256("ffor/witness/manifest" ‖ manifest without the signature)`. It proves that
+whoever provisioned controls `fetch_key`, which is the only identity a witness ever
+needs; the Noise-authenticated peer id of the provisioning connection is **not** part
+of authorization, so `R` MAY provision over any connection, including one that is not
+its node identity. `retention_until` MUST be at least `T_exp + 144`. `min_receipts` is
+the number of guardian receipts (Appendix F.4) the witness MUST obtain before
+propagating a fulfil; `0` means local durability only.
+
+The witness verifies the signature, recomputes `H_book` from the book and `H_act`
+from `T_setup`, `H_book`, `H_commit` and `epoch_start_height` (§7.5.2) and refuses a
+manifest whose `H_act` does not match (so the book it stores is provably the one the
+epoch activated), checks the book's internal consistency (`K` entries, unique hashes,
+`Σ d_k` equal to the budget the book implies), reserves capacity for `K` records,
+persists the manifest durably, and answers `ff_witness_ack`. `T_setup` and `H_commit`
+are digests and reveal nothing about the channel. A witness that cannot reserve MUST refuse, and MAY require a
+prior registration or payment for the service (issue coreyphillips/beignet#709 is one
+such admission contract). A refused provisioning means `R` MUST NOT count that
+witness.
+
+`R` MUST persist, before going offline, the set of witnesses it provisioned with their
+`mailbox_id`, `fetch_key` private half and `enc_key` private half; without them the
+records are unrecoverable. These belong with the rest of the epoch record of §7.5.5.
+
+#### 9.6.5 Recording: store before you propagate
+
+A witness forwards HTLCs normally and holds nothing. Its one FFOR behaviour is on the
+way back. When `W` receives `update_fulfill_htlc(t)` from downstream for an outgoing
+HTLC whose `payment_hash` equals some `H_k` in an active manifest, then before it sends
+the corresponding `update_fulfill_htlc` upstream it MUST:
+
+1. verify `SHA256(t) == H_k`; on mismatch this is not a delegated fulfil and the
+   ordinary forwarding rules apply unchanged;
+2. build the record of Appendix F.2 for `(mailbox_id, k)`, encrypting the body to
+   `enc_pubkey` and signing the header with its node key;
+3. commit the record to its durable store, fsync-backed, so that a crash after this
+   step and before step 5 still leaves the record retrievable on restart;
+4. if `min_receipts > 0`, obtain that many guardian receipts (Appendix F.4) and append
+   them to the record;
+5. and only then propagate the fulfil upstream.
+
+Idempotency: a second downstream fulfil for the same `(mailbox_id, k)` with the same
+`t` is a no-op that MUST NOT create a second record; one with a different `t` is
+impossible (the hash is fixed) and MUST be treated as a protocol error on the
+downstream channel. Records are append-only per slot and per mailbox.
+
+The barrier is bounded, because a witness that never propagated would strand the
+payer's HTLC and eventually its own upstream channel:
+
+- `W` MUST propagate the fulfil no later than `incoming_cltv_expiry − W`'s safety
+  delta, whatever the state of steps 3 and 4, and SHOULD propagate within a small
+  wall-clock bound (recommended 30 seconds) in normal operation. `W` holds `t` from
+  step 1 on, so it can always claim its incoming HTLC on-chain; delaying is safe for
+  `W` and unsafe only for the upstream channel's liveness.
+- If the deadline arrives with step 3 incomplete, `W` MUST still propagate, MUST keep
+  trying to store, and MUST mark the record `unbarriered` when it does store it. If
+  step 4 is what is incomplete, `W` propagates and keeps collecting receipts. An
+  `unbarriered` record is served like any other; `R` learns from the flag that the
+  witness's durability promise was not kept for that slot.
+
+A witness MUST NOT hold, delay or fail a delegated HTLC on the way **downstream**
+for any FFOR reason. The profile's entire settlement effect on the payer is the
+sub-second pause of the barrier on the way back.
+
+#### 9.6.6 Retrieval, close and retention
+
+On return, `R` sends each witness `ff_witness_fetch` (Appendix F.1), signed under
+`fetch_key` with a requester-chosen nonce the witness MUST refuse to accept twice for
+that mailbox. The witness answers with every record it holds for the mailbox. `R` MUST:
+
+1. verify each record's witness signature against the node id the record names, and
+   that node id against the witness it provisioned;
+2. verify `H_act` and `terms_hash` against its own book;
+3. decrypt the body under `enc_key` and verify `SHA256(t) == H_k` and that the body's
+   `(k, H_k, d_k)` match the header;
+4. union the results across every witness it provisioned and every other source (the
+   `ff_close_ack` preimages, payer receipts). A record present at one witness and
+   absent at another is an audit fact, not a fault of the protocol.
+
+`R` then closes and drains per §7.5.6 with the union, or force-closes per §9.5.1 with
+the same preimages if `S` will not answer. Records retrieved after `T_exp` are still
+served (retention) but can no longer be enforced.
+
+At `ff_close_ack` `R` SHOULD send each witness `ff_witness_close` (`mailbox_id`,
+`H_act`, the settled bitmap, signed under `fetch_key`). On receipt the witness stops
+creating records for the mailbox (a fulfil already at step 2 completes), and keeps
+existing records until `retention_until`. A witness MUST NOT delete a record before
+`retention_until` and MAY delete everything for the mailbox after it. Closing is
+advisory for the witness's bookkeeping; it is not what ends `R`'s ability to fetch.
+
+#### 9.6.7 What a witness is exposed to, and the bounds
+
+- **Storage**: `K` records of at most Appendix F.2's size per mailbox, reserved at
+  provisioning and released at `retention_until`. A witness sets its own caps on
+  mailboxes, records and bytes, and refuses provisioning beyond them.
+- **Time**: the barrier is bounded by §9.6.5 and never exceeds the HTLC's own expiry.
+- **Privacy**: a witness learns every delegated hash of the epoch, which of them
+  settled, the amounts it forwarded, and its neighbours on the path. It learns neither
+  `R`'s node id nor the channel, and the body it stores it cannot read. Two witnesses
+  cannot link their mailboxes to each other except through the shared hashes on the
+  path, which a routing node sees anyway.
+- **Denial of service**: provisioning is the only unsolicited work, and it is
+  authorized by `fetch_key`, not by a node id, so a witness MUST gate it by capacity
+  and MAY gate it by registration or payment. Fetch and close are signed and
+  nonce-bound and cost one read.
+- **Liability**: none. A witness that loses a record costs `R` liveness for that slot
+  if no other source has it, and nothing else; it never holds or moves funds.
+
+#### 9.6.8 Adversarial validation
+
+A conforming implementation's test plan MUST cover, with the oracle being what `R`
+can enforce rather than what any party reports:
+
+- `S` crashing before and after every durable write and before and after the upstream
+  fulfil (§9.5.1 per-slot state);
+- the witness crashing before step 3, after step 3, after step 4, and after step 5 of
+  §9.6.5, on restart serving exactly the records the steps imply;
+- one witness withholding, corrupting, replaying, or deleting a record while another
+  holds it;
+- all but one witness unavailable;
+- a payment over a path that omits every witness: an honest `S` fails it (TLV 13); a
+  dishonest `S` settles it and `R` has only the payer;
+- duplicate and concurrent same-hash HTLCs, MPP attempted despite the prohibition, and
+  a witness settling a second same-hash HTLC itself (§13.7.1);
+- a payment before `ACTIVE` and after admission close;
+- `R` returning just inside and just outside `claim_margin`;
+- both commitment views published, with fee spikes, dust boundaries, pinning, reorgs
+  and the loss of sponsor inputs;
+- a witness retaining records after close and serving them; and no payment at all,
+  where `S` must recover every voucher by timeout without any claim reaching `R`.
+
+---
+
 ## 10. Escape: `S`'s unilateral exit (optional, `G > 0`)
 
 Escapes are a **Variant A/B mechanism**. Variant D (§9.5) needs none: its vouchers carry
@@ -1978,6 +2238,21 @@ expected to keep passing (the theft succeeds) until the stronger target lands.
 
 ---
 
+### 13.8 D1-WR: terminal one-shot witness recovery (deferred)
+
+D-R (§9.6) covers an `R` that returns inside its window. An `R` that may never return
+needs a witness that can enforce on its behalf, which means giving a witness a
+complete, fee-funded broadcast kit for `R`'s commitment. That is only safe if the
+commitment can never be revoked, since a witness holding an old signature is otherwise
+a stale-state broadcaster in waiting. The construction, D1-WR, is: `K = 1`, the
+voucher-bearing commitment is terminal, the funding output is ultimately spent rather
+than the channel returning to ordinary operation, and after a configured trigger the
+witness publishes the receiver claim and the channel closes. Deletion or a signed
+delete acknowledgement never makes an old Bitcoin signature safe; terminality is the
+property. A reusable autonomous profile needs a non-penalty state construction
+(LN-Symmetry or a covenant-backed receive slot). D1-WR is documented in issue
+coreyphillips/ffor#24 and is not part of this version.
+
 ## 14. Message and TLV registry (provisional)
 
 | Type | Name | Dir | Signed |
@@ -1998,6 +2273,12 @@ expected to keep passing (the theft succeeds) until the stronger target lands.
 | 55049 | `ff_abort` | both | ✍ |
 | 55051 | `ff_close` | R→S | ✍ |
 | 55053 | `ff_close_ack` | S→R | ✍ |
+| 55055 | `ff_witness_provision` | R→W | (manifest signed under `fetch_key`, Appendix F.1) |
+| 55057 | `ff_witness_ack` | W→R | |
+| 55059 | `ff_witness_fetch` | R→W | ✍ (`fetch_key` digest, Appendix F.1) |
+| 55061 | `ff_witness_fetch_resp` | W→R | (records individually signed by `W`) |
+| 55063 | `ff_witness_close` | R→W | ✍ (`fetch_key`) |
+| 55065 | `ff_witness_close_ack` | W→R | |
 | 55031 | `ff_tower_provision` | R→T | |
 | 55033 | `ff_tower_ack` | T→R | |
 | 55035 | `ff_tower_release` | S→T | (carries the ✍ `ff_settlement`) |
@@ -2010,7 +2291,8 @@ expected to keep passing (the theft succeeds) until the stronger target lands.
 `channel_reestablish` TLVs: 55001 (epoch state and `H_act`, §11.1), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). `ff_init`
 TLV 9 and `ff_accept` TLV 9: `voucher_amounts_msat` (§7.1, §7.2, §7.6). `ff_accept`
-TLV 11: `init_hash` (§7.2, §7.5.2). `ff_close_ack` TLV 1: `preimages` (§7.5.4). Feature bits
+TLV 11: `init_hash` (§7.2, §7.5.2). `ff_init` TLV 13: `witness_peers` (§9.6.3).
+`ff_close_ack` TLV 1: `preimages` (§7.5.4). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
 §11.3) and 55043 (tower service advertisement, §11.3). All numbers provisional
 pending bLIP assignment.
@@ -2032,7 +2314,8 @@ Appendices: (A) canonical `C_i^R` construction test vectors, see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights,
 below; (C) tower transport (provisioning/authentication wire format), below;
 (D) Variant D setup transcript and both-view commitment vectors for §7.5 and §9.5.1,
-see companion file `ffor-variant-d-vectors.md`; (E) taproot variant, TBD.
+see companion file `ffor-variant-d-vectors.md`; (E) taproot variant, TBD; (F) witness
+transport and the payment mailbox object, below.
 
 ---
 
@@ -2159,6 +2442,32 @@ transport.
 
 ---
 
+### 15.3 M9: D-R receipt witnesses
+
+Builds on M8 (plain Variant D on master). Each gate is judged by what `R` can enforce.
+
+1. **M9.0: Witness module and manifest.** `ff_witness_provision` / `ff_witness_ack`
+   over BOLT 8; manifest verification; capacity reservation; durable manifest store
+   that rehydrates on restart with `R` offline. **Gate:** provision, restart the
+   witness, fetch an empty mailbox; a manifest with a bad `fetch_key` signature or an
+   inconsistent book is refused.
+2. **M9.1: Store before propagate.** The §9.6.5 barrier on a three-hop path
+   `P → W → S → R` with `R` offline. **Gate:** the record is fsync-committed before
+   the upstream `update_fulfill_htlc` leaves `W` (assert on the store and the wire
+   log); the payer sees success; `S` sends nothing to `R`; the barrier deadline case
+   propagates with the `unbarriered` flag.
+3. **M9.2: Witness rescue.** `S` settles and vanishes. `R` returns, fetches from `W`
+   alone, decrypts, verifies, force-closes and sweeps the voucher with the setup-time
+   signature. **Gate:** `R` recovers `d_k` with no cooperation from `S` and no payer.
+4. **M9.3: Crash matrix.** Every §9.6.8 case for `S` and `W`, both sides of every
+   durable write, on regtest. **Gate:** each case ends with exactly the records and
+   the enforceable claims §9.6.5 implies.
+5. **M9.4: Reuse by a witness, characterization.** A witness that settles a second
+   same-hash HTLC itself. **Gate:** the theft succeeds and is evidence-free, as
+   §13.7.1 says; the test inverts when a payer-bound settlement primitive lands.
+6. **M9.5: Issuance.** The distributor of issue #25 as a witness that serves BOLT 12
+   invoices for unconsumed slots. Specified separately; gated there.
+
 ## 16. Prior art and references
 
 - ZmnSCPxj, *Fast Forwards*, [lightning-dev, April 2019](https://lists.linuxfoundation.org/pipermail/lightning-dev/2019-April/001986.html);
@@ -2270,6 +2579,17 @@ onion's associated data and payload set in §9.5.1, the anchor term of the fee-s
 buffer in §7.6, and Appendix A's `D` (now `T_exp − 1008`).
 
 ---
+
+### 17.4 v0.9 → v0.9.1 (D-R)
+
+Additive. Nothing changes for an implementation that does not use the profile.
+
+| # | Section | Change |
+|---|---|---|
+| 1 | §9.6 | The D-R receipt-witness profile: claim, roles, path requirements, provisioning, store-before-propagate with a bounded barrier, retrieval, close, retention, exposure bounds, adversarial validation |
+| 2 | §7.1 | `ff_init` TLV 13 `witness_peers`; `S` fails delegated HTLCs from any other peer |
+| 3 | §14, Appendix F | Messages 55055 to 55065; the manifest, record, encryption and receipt formats |
+| 4 | §4, §13.8, §15.3 | D-R in the trust overview; D1-WR recorded as deferred; M9 milestones |
 
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
@@ -2495,3 +2815,92 @@ multiple messages (a future extension).
 
 A tower answering these messages MUST persist provision and release state per the §9.4
 restart contract, so both survive a tower restart while `R` is offline.
+
+---
+
+## Appendix F: witness transport and the payment mailbox object (D-R, §9.6)
+
+Direct BOLT 8 peer messages, as in Appendix C: odd, ignorable types; a 16-byte
+`request_id` echoed in each response; all integers big-endian. Unlike Appendix C,
+**no operation is authorized by the Noise peer identity**: the witness never needs to
+know who `R` is, and every request is authorized under the mailbox's `fetch_key`. An
+onion-message transport is a future privacy upgrade.
+
+### F.1 Messages
+
+| Type | # | Dir | Body |
+|---|---|---|---|
+| `ff_witness_provision` | 55055 | R→W | `[16: request_id][manifest]` (§9.6.4, includes `manifest_sig`) |
+| `ff_witness_ack` | 55057 | W→R | `[16: request_id][1: ok]` then ok ⇒ `[33: witness_node_id][4: retention_until]`, else `[2: err_len][error]` |
+| `ff_witness_fetch` | 55059 | R→W | `[16: request_id][32: mailbox_id][32: nonce][64: sig]`, `sig` under `fetch_key` over `SHA256("ffor/witness/fetch" ‖ mailbox_id ‖ nonce)` |
+| `ff_witness_fetch_resp` | 55061 | W→R | `[16: request_id][1: ok]` then ok ⇒ `[2: num_records]{[2: len][record]}*`, else `[2: err_len][error]` |
+| `ff_witness_close` | 55063 | R→W | `[16: request_id][32: mailbox_id][32: H_act][2: K][ceil(K/8): settled][32: nonce][64: sig]`, `sig` under `fetch_key` over `SHA256("ffor/witness/close" ‖ body without sig)` |
+| `ff_witness_close_ack` | 55065 | W→R | `[16: request_id][1: ok][2: num_records_held]` |
+
+A witness MUST reject a fetch or close whose nonce it has already accepted for that
+mailbox, and MUST answer an unknown `mailbox_id` exactly as it answers a mailbox with
+no records (so that probing for mailbox ids learns nothing).
+
+### F.2 The record
+
+```
+header  = [1: version = 1][1: profile = 1]
+          [32: mailbox_id][32: record_id][2: k]
+          [32: H_act][32: terms_hash]
+          [33: witness_node_id][33: enc_pubkey]
+          [4: recorded_height][1: flags]
+          [32: ciphertext_hash]
+record  = header ‖ [64: witness_sig] ‖ [2: ct_len][ct_len: ciphertext]
+          ‖ [1: num_receipts]{[2: len][receipt]}*
+```
+
+`record_id` is 32 random bytes. `terms_hash = SHA256("ffor/terms" ‖ entry_k)` over the
+book entry of §7.5.3, so a record commits to `(k, H_k, d_k, T_exp, D, s_htlc_id_k)`
+without revealing them to anyone who lacks the book. `flags` bit 0 is `unbarriered`
+(§9.6.5). `ciphertext_hash = SHA256(ciphertext)`. `witness_sig` is the witness's
+node-key compact signature over `SHA256("ffor/witness/record" ‖ header)`; it is the
+§12.2 evidence that this witness saw the preimage, and it is what lets `R` audit a
+witness that later serves a different ciphertext.
+
+The plaintext body, before encryption:
+
+```
+body = [32: epoch_id][2: k][32: t][32: H_k][8: d_k][4: T_exp][4: D]
+       [8: amount_in_msat][8: amount_out_msat][4: outgoing_cltv][8: observed_unix_time]
+```
+
+`R` verifies, after decryption, that `SHA256(t) == H_k`, that `(k, H_k, d_k, T_exp, D)`
+reproduce `terms_hash`, and that `epoch_id` is its own. The amounts and time are
+context for `R`'s books and carry no protocol meaning.
+
+Size: the header is 235 bytes, the signature 64, the ciphertext 142 bytes of body plus
+Appendix F.3's overhead, receipts as configured; well under 1 KB per record without
+receipts.
+
+### F.3 Encryption
+
+ECIES over secp256k1: the witness generates an ephemeral keypair `e`, computes
+`s = SHA256(ECDH(e, enc_pubkey))`, derives `key = HKDF-SHA256(s, "ffor/witness/body")`
+(32 bytes), and encrypts the body with ChaCha20-Poly1305 under `key`, nonce all
+zeros (the key is single-use), AAD = the record header. `ciphertext = [33: e_pub] ‖
+aead_output`. The ephemeral key MUST be fresh per record. The AAD binds the body to
+the header, so a witness cannot serve one body under another header without
+detection.
+
+### F.4 Guardian receipts
+
+A receipt is a storage acknowledgement from a third party the witness replicated the
+record to, under whatever fault assumption that party documents. This specification
+does not define the receipt format or the replication protocol; the beignet guardian
+protocol is one provider, and its receipts are opaque bytes here. A receipt is
+**not** proof of payment, proof of solvency, or proof of Byzantine retrievability, and
+`R` MUST NOT treat the presence of receipts as anything more than the witness's claim
+that it did what `min_receipts` asked. What `R` can verify is the record it decrypts.
+
+### F.5 Durability
+
+A witness answering these messages MUST persist manifests and records so that both
+survive a witness restart while `R` is offline, MUST rehydrate every mailbox on
+restart without any message from `R`, and MUST honour `retention_until`. The
+store-before-propagate order of §9.6.5 is what makes the profile's claim true; a
+witness that propagates first and stores later is not a receipt witness.
