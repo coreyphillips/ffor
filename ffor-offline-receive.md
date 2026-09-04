@@ -416,14 +416,21 @@ Requirements:
 | `num_invoices` | u16 | count carried by *this* chunk |
 | `invoices` | var | length-prefixed BOLT 11 strings |
 
-**Chunking (REQUIRED).** A BOLT 8 peer message is capped at 65535 bytes, and a
+**`ff_invoices` is OPTIONAL.** `S` recognises a delegated payment from the hash set
+alone (§9.2, §9.5.1) and MUST accept delegated payments whether or not it ever received
+the invoices. The message exists only so that `S` can serve invoices to payers on `R`'s
+behalf, which is the one distribution configuration §13.7 warns against, and `R`
+SHOULD NOT send it unless `S` is deliberately the distributor. Setup completes without
+it.
+
+**Chunking (REQUIRED when sent).** A BOLT 8 peer message is capped at 65535 bytes, and a
 pre-signed invoice with a route hint runs 300 to 400 bytes, so a single message
 overflows around `K = 180`, well below the `K = 483` §8 permits, and nowhere near
 §9.5.4's `M(M+1)/2` sets. `ff_invoices` is therefore repeatable: `R` sends as many
 chunks as it needs, each self-describing via `first_index`, and `S` MUST treat them as
 order-independent and idempotent (a chunk re-sent after a reconnect is applied by
-index, not appended). Setup completes only when `S` holds all `total_invoices`; a
-missing chunk at `ff_activate` is grounds for `ff_abort`. Each chunk MUST fit the
+index, not appended). If `R` sends it, setup completes only when `S` holds all
+`total_invoices`; a missing chunk at `ff_activate` is grounds for `ff_abort`. Each chunk MUST fit the
 peer-message limit.
 
 Common to every variant: payment hash `H_i`, an `expiry` no later than a conservative
@@ -446,14 +453,27 @@ one, and the voucher pays whatever `S`'s hop payload says to forward, an amount 
 **Ordering, by variant.** In Variants A and B the set is **strictly ordered**:
 settlement `seq i` carries exactly `H_i` (§9.1), and the §7.2 `H_1` binding requires the
 first settled payment to be hash 1, so `S` MUST serve invoice `i+1` only after `i` is
-consumed and MUST fail upstream any delegated hash arriving out of order. Variant D
-imposes no such order: each voucher is independently committed and independently
-settled, so any unconsumed `H_k` may be paid at any time. The one exception is §9.5.4's
-hash chain, whose levels are ordered by construction.
+consumed and MUST fail upstream any delegated hash arriving out of order. This makes
+`R`-distributed invoices impractical in A and B beyond a single known payer (two payers
+holding invoices `1` and `2` must pay in that order), which is one more reason the
+strong profiles are Variant D's. Variant D imposes no such order: each voucher is
+independently committed and independently settled, so any unconsumed `H_k` may be paid
+at any time. The one exception is §9.5.4's hash chain, whose levels are ordered by
+construction.
 
-Distribution: v1 leaves payer-side distribution out of scope. `S` MAY serve the next
-unused invoice via LNURL-pay-style endpoint, BOLT 12 message relay, or any out-of-band
-channel on `R`'s behalf. (BOLT 12 static-invoice integration: §13.2.)
+**Distribution.** Who hands the invoice to the payer decides how much of §13.7's reuse
+vector exists. Three configurations, in decreasing order of safety:
+
+| Distributor | Reuse requires | Serves unknown payers |
+|---|---|---|
+| `R` itself, before going offline, one invoice per known payer and order | a payer who received an invoice to initiate a second attempt on it, or to pass it on | no |
+| an online distributor that is not `S` (a tower, a receipt witness, or the issuer of issue #25), issuing each slot once | the same, plus the distributor's own Sybil resistance (it cannot tell `S` from a payer) | yes |
+| `S` (`ff_invoices` sent) | nothing: `S` holds both the invoices and, after the first settlement, the preimage | yes |
+
+The first two are operational mitigations, not cryptographic closure (§13.7.1). The
+third is the attack capability itself and MUST NOT be used with an `S` that `R` does
+not otherwise trust with the budget. (BOLT 12 static-invoice integration: §13.2;
+unknown-payer issuance: issue #25.)
 
 *Privacy note:* `S` cannot decrypt the final onion hop (it is encrypted to `R`'s node
 key), so `payment_secret` is unenforced for delegated payments. This is acceptable:
@@ -1679,7 +1699,7 @@ Attack surface, by actor:
 | **Settle upstream, withhold the credit** (never deliver package, never broadcast) | **Variant B: impossible**, since the preimage physically does not reach `S` until `T` durably holds the verified package; `R` recovers everything from `T` even if `S` vanishes. **Variant A: possible**; this is the variant's honest limitation. `R`'s loss is bounded by the epoch budget; the fraud is automatically evidenced (payer holds `R`-signed invoice + preimage; `S` signed `ff_accept` over the hash set; for payment 1 the preimage is also `S`'s own revocation secret). "Cheating is provable and bounded" rather than "impossible": use Variant A only where that suffices. |
 | Under-credit the voucher / skim beyond fee | Fixed-amount profile: not possible undetected. The voucher MUST equal the `d_k` in both signed setup messages, `T` refuses any other package before releasing the preimage (B), and `R` refuses it on return (A, D). `S`'s only surplus is fee overpayment the payer chose (§7.6). Amountless profile: `S`'s report of the upstream amount is unverifiable by `T` or `R`, and the payer's receipt states no amount either; the theft is bounded only by what payers send. Use fixed amounts. |
 | Refuse reconciliation / stall conversion | `R` force-closes `C_j^R` before `T_exp` and claims all vouchers via pre-signed HTLC-success txs. This is the standard unilateral-close cost, not a loss. |
-| **Reuse an invoice / settle the same `H_k` twice** | **Not closed by any variant.** A preimage is a bearer token: once `S` holds `t_k` it can fulfil *every* upstream HTLC carrying `H_k`, and the tower is never consulted for the second. `R` is credited once; `S` pockets the rest. Mitigation is a distribution rule, not a protocol gate: see §13.7. |
+| **Reuse an invoice / settle the same `H_k` twice** | **Not closed by any variant.** A preimage is a bearer token: once `S` (or any on-path witness) holds `t_k` it can fulfil *every* upstream HTLC carrying `H_k`, and the tower is never consulted for the second. `R` is credited once; the holder pockets the rest. A distribution rule bounds it (a second attempt needs an invoice holder to start it); nothing prevents it: see §13.7.1. |
 
 ### 12.2 Fraud-proof inventory
 
@@ -1717,7 +1737,8 @@ deviation unprofitable even in Variant A.
 
 Stated plainly: (1) Variant A's and Variant D's bounded withholding exposure; (2)
 `payment_secret` unenforced, and single-use hashes are an **assumption the protocol does
-not enforce** (§13.7); (3) in the amountless profile only, amount attestation is amountless-grade and
+not enforce**: reuse is bounded by who holds the invoice and is not cryptographically
+prevented in any variant or distribution configuration (§13.7.1); (3) in the amountless profile only, amount attestation is amountless-grade and
 `S`'s reported amounts are unverifiable (§7.6, §13.3), which the fixed-amount
 profile removes; (4) `R` must return before `T_exp` or its claims rest
 on `S`'s honesty / escape rounding; (5) `S` learns `R`'s offline schedule and all payment
@@ -1848,7 +1869,7 @@ One epoch per channel; `R` MAY run concurrent epochs on different channels with
 disjoint hash sets (each invoice's route hint pins its `S`). Cross-`S` budget
 aggregation and payer-side choice are out of scope.
 
-### 13.7 Invoice serving and hash reuse (open problem)
+### 13.7 Invoice serving and hash reuse (bounded, not closed)
 
 A preimage is a **bearer token**. Once `S` holds `t_k`, it can fulfil *any* upstream HTLC
 carrying `H_k`, not merely the first. If a second payer pays an HTLC with
@@ -1882,9 +1903,11 @@ by single-use hashes" are both MUSTs aimed squarely at the party that would be c
 Single-use is enforceable only by whoever **distributes** the invoices:
 
 - **`R` distributes its own invoices out-of-band before going offline** (one per known
-  payer, per order). `S` then cannot induce a second payment on a hash it was never able
-  to hand out twice. This is the safe configuration and **SHOULD be the v1 default**; it
-  is also the configuration in which `R`'s pre-signed invoice set is a natural fit.
+  payer, per order). `S` then cannot *induce* a second payment on a hash it was never
+  able to hand out; a second attempt needs someone who holds the invoice to make it.
+  This is the safest configuration and **SHOULD be the v1 default**; it is also the
+  configuration in which `R`'s pre-signed invoice set is a natural fit. It is a
+  mitigation, not a closure (§13.7.1).
 - **`S` serves `R`'s invoices.** `S` then holds exactly the capability this attack
   requires. §13.2's proposed convergence with async-payments invoice serving (a static
   invoice held by an always-online node) therefore **MUST NOT** place `S` in that role
@@ -1896,6 +1919,62 @@ Single-use is enforceable only by whoever **distributes** the invoices:
 
 Until one of those lands, this bounds how much invoice distribution may be delegated to
 `S`, and it should be read as a constraint on §13.2's roadmap rather than a footnote.
+
+#### 13.7.1 What the distribution rule does and does not do
+
+Keeping `ff_invoices` away from `S` (§7.3) removes `S`'s ability to *create* a second
+payment on a consumed hash. It is defence in depth. It is **not** a cryptographic
+single-use guarantee, and this spec makes no claim that any configuration is
+"theft-free". The security property FFOR needs is
+
+```
+one successful logical payment  ->  one independently recoverable receiver credit
+```
+
+and the HTLC construction does not enforce that mapping once anyone on the path holds
+`t_k`:
+
+1. A BOLT 11 invoice is a transferable bearer object. Its intended holder can forward
+   it, leak it, or pay it twice.
+2. A public distributor serving unknown payers cannot reliably distinguish `S`, or a
+   Sybil identity `S` controls, from a payer. Serving an invoice once does not stop the
+   recipient from copying it.
+3. BOLT 2 requires a receiver to accept multiple HTLCs carrying the same
+   `payment_hash`. Honest MPP, a retry after an ambiguous result, and concurrent
+   attempts all present one hash more than once, so "second HTLC on `H_k`" is not by
+   itself evidence of anything.
+4. After the first settlement `S` holds `t_k` and needs nothing from `T`, `R`, or the
+   chain to fulfil every later HTLC on `H_k`.
+5. Every receipt witness on the path (issue #24) learns plaintext `t_k` when the
+   fulfil passes through it. A witness can settle a later HTLC on `H_k` itself and never
+   forward that attempt to `S`. The party that can take a reused hash is therefore any
+   on-path holder of `t_k`, not only `S`.
+6. An invoice stays payable until its `expiry`; §7.5.6 ties that to `D` so an invoice
+   cannot outlive its slot, but it can still be paid a second time inside the window.
+
+The accurate statement is: **reuse requires someone who possesses the invoice to
+initiate another attempt, and FFOR does not cryptographically prevent it.** The honest
+`S` guard of M8.8 (refuse a consumed hash) is real, is required, and is enforced by the
+party that would profit from omitting it.
+
+The narrow deployment in which no second attempt can arise is: `R` hands one
+fixed-amount invoice directly to one known, conforming payer; MPP is disabled; the payer
+pays it once; and `S` durably rejects later attempts. Every wider deployment carries the
+residual above, bounded by what payers send, and MUST be described that way.
+
+The stronger target is a fresh per-payment secret that `S` cannot reuse alone. PTLCs
+are not sufficient by themselves: closing reuse needs a payer-specific tweak *and* a
+fresh online gate input per settlement, which changes the payer protocol and reintroduces
+an always-online party on the settlement path (§13.5, §12.5). That construction is
+future work, and nothing in v0.9 depends on it.
+
+A conformance test for this section MUST count receiver-enforceable credits, not
+whether an honest `S` returned an error. Cases: the same signed invoice delivered to two
+payers; `S` obtaining an invoice from a public distributor under another identity; two
+concurrent same-hash HTLCs; MPP on one hash; a retry after an ambiguous fulfil; a payment
+after `ff_close` but before invoice expiry; a witness settling a second same-hash HTLC;
+and a malicious `S` omitting its consumed-hash check. M8.8(b) is the last of these and is
+expected to keep passing (the theft succeeds) until the stronger target lands.
 
 ---
 
@@ -2174,17 +2253,21 @@ transcript (§9.5.1, issue #23). Message types 55011 and 55021 are retired.
 | 7 | §7.5.5 | Towers acknowledged provisioning | Every tower or witness MUST acknowledge `H_act` before any invoice is exposed and MUST refuse records that do not name it |
 | 8 | §11.1 | Reestablish TLV 55001 `{epoch_id, last_seq, state}` with four states; number carve-out for every variant | `{epoch_id, state, last_seq, activation_hash}` with the seven states; the carve-out is A/B only, Variant D uses BOLT 2's reestablish rules unchanged |
 
+| 9 | §7.3 | `ff_invoices` required; setup incomplete without it | OPTIONAL and SHOULD NOT be sent unless `S` is deliberately the distributor; `S` recognises delegated payments from the hash set alone |
+
 Editorial only: §6's diagram and lifecycle line; §11.2 gains the close-race and
-abort-after-round cases; §15.2's M8.1 and M8.3 gates restated against §9.5.1 and
-§7.5. Appendix D (`ffor-variant-d-vectors.md`) carries the transcript and both-view
-commitment vectors for §9.5.1: five scenarios (K = 1; K = 3 with S funding; K = 3
-with R funding; the 546,000 msat dust boundary; K = 483), every signed message as wire
-bytes, every hash of §7.5.2, both commitment views with all second-stage signatures,
-and all four force-close spends of voucher 1, computed with beignet's builder and
-verified both ways. Its generation fixed the signing and TLV-extent definitions in §7,
-the empty point list under Variant D in §7.1, the onion's associated data and payload
-set in §9.5.1, the anchor term of the fee-spike buffer in §7.6, and Appendix A's `D`
-(now `T_exp − 1008`).
+abort-after-round cases; §13.7 retitled "bounded, not closed" with §13.7.1 stating
+exactly what the distribution rule does and does not do (issue #20), §7.3's
+distribution table, §12.1 and §12.4 aligned; §15.2's M8.1 and M8.3 gates restated
+against §9.5.1 and §7.5. Appendix D (`ffor-variant-d-vectors.md`) carries the
+transcript and both-view commitment vectors for §9.5.1: five scenarios (K = 1; K = 3
+with S funding; K = 3 with R funding; the 546,000 msat dust boundary; K = 483), every
+signed message as wire bytes, every hash of §7.5.2, both commitment views with all
+second-stage signatures, and all four force-close spends of voucher 1, computed with
+beignet's builder and verified both ways. Its generation fixed the signing and
+TLV-extent definitions in §7, the empty point list under Variant D in §7.1, the
+onion's associated data and payload set in §9.5.1, the anchor term of the fee-spike
+buffer in §7.6, and Appendix A's `D` (now `T_exp − 1008`).
 
 ---
 
