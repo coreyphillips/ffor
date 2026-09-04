@@ -194,9 +194,12 @@ const T_EXP = 800_000; // voucher_expiry (uniform cltv_expiry)
 const D_DEADLINE = 799_000; // settlement_deadline (documentation only)
 const FEE_BASE_MSAT = 1000n;
 const FEE_PROP_MILLIONTHS = 5000n;
-const BUDGET_MSAT = 100_000_000n;
-const K_MAX_PAYMENTS = 8;
-const MIN_PAYMENT_MSAT = 10_000n;
+// Fixed-amount profile (FFOR 7.1, 7.6): K equals the number of TLV 9 amounts,
+// budget_msat equals their sum, and min_payment_msat sits at the voucher dust
+// floor (546 sat under option_anchors_zero_fee_htlc_tx), which is also the
+// smallest d_k the profile can admit.
+const K_MAX_PAYMENTS = 3;
+const MIN_PAYMENT_MSAT = 546_000n;
 
 // Pre-epoch balances (mirrors Appendix C's 7M/3M split):
 // S (opener/funder) holds 7,000,000 sat; R holds 3,000,000 sat.
@@ -215,6 +218,8 @@ const ANCHOR_TOTAL_SAT = 660n;
 // output; dust_limit 546 sat; zero-fee second-level HTLC txs under
 // option_anchors), so the >= dust_limit boundary is exercised on purpose.
 const VOUCHER_AMOUNTS_MSAT = [994_000n, 546_250n, 49_749_000n];
+const BUDGET_MSAT = VOUCHER_AMOUNTS_MSAT.reduce((a, b) => a + b, 0n);
+assert(VOUCHER_AMOUNTS_MSAT.length === K_MAX_PAYMENTS, 'K == number of TLV 9 amounts');
 
 // FFOR 7.6: S's forwarding fee for the S->R hop, BOLT 7's formula with
 // integer division, evaluated on the PAYEE amount.
@@ -337,6 +342,8 @@ for (const v of vouchers) {
 	assert(cumulative <= BUDGET_MSAT, `payment ${v.seq}: cumulative <= budget`);
 }
 assert(vouchers.length <= K_MAX_PAYMENTS, 'i <= K');
+// Fixed-amount profile: the amount list sums to exactly budget_msat (FFOR 7.1).
+assert(cumulative === BUDGET_MSAT, 'sum(d_k) == budget_msat');
 assert(
 	sha256(P1).equals(vouchers[0].paymentHash),
 	'H_1 = SHA256(per_commitment_secret_S[n0])'
@@ -703,9 +710,9 @@ w(`| profile | fixed-amount (\`ff_init\` TLV 9 present, FFOR 7.6) |`);
 w(
 	`| \`voucher_amounts_msat\` (TLV 9, \`d_1..d_3\`) | ${VOUCHER_AMOUNTS_MSAT.join(', ')} |`
 );
-w(`| \`budget_msat\` | ${BUDGET_MSAT} |`);
+w(`| \`budget_msat\` (= sum of TLV 9) | ${BUDGET_MSAT} |`);
 w(`| \`K\` (\`max_payments\`) | ${K_MAX_PAYMENTS} |`);
-w(`| \`min_payment_msat\` | ${MIN_PAYMENT_MSAT} |`);
+w(`| \`min_payment_msat\` (= voucher dust floor, 546 sat) | ${MIN_PAYMENT_MSAT} |`);
 w(`| \`G\` (\`escape_granularity_msat\`) | 0 (no escape set) |`);
 w();
 w('### Secrets and seeds');
@@ -776,11 +783,12 @@ w('`fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)`.')
 w('`S` checks `amt_to_forward == d_k` and `amount_msat - d_k >= fee_S(d_k)`.');
 w(`All voucher HTLCs use \`cltv_expiry = T_exp = ${T_EXP}\`.`);
 w();
-w('> Note: `d_2 = 546,250 msat` gives a 546 sat output, exactly at the voucher');
-w('> dust floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero');
-w('> under `option_anchors_zero_fee_htlc_tx`). The `>= dust_limit` boundary is');
-w('> intentionally exercised; one millisatoshi less would trim and a compliant');
-w('> `S` MUST reject it at setup (FFOR §7.6, §8).');
+w('> Note: `d_2 = 546,250 msat` gives a 546 sat output, at the voucher dust');
+w('> floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero under');
+w('> `option_anchors_zero_fee_htlc_tx`) with a 250 msat sub-satoshi remainder.');
+w('> The trim boundary itself is `546,000` msat accepted and `545,999` msat');
+w('> trimmed (A.5); a compliant `S` MUST reject a trimming `d_k` at setup');
+w('> (FFOR §7.6, §8).');
 w();
 w('| k | d_k (voucher) msat | fee_S(d_k) msat | gross_into_S msat | v_k output (sat) | preimage P_k | payment_hash H_k |');
 w('|---|---|---|---|---|---|---|');
@@ -790,7 +798,7 @@ for (const v of vouchers) {
 	);
 }
 w();
-w(`Cumulative voucher value: ${cumulative} msat <= budget ${BUDGET_MSAT} msat.`);
+w(`Cumulative voucher value: ${cumulative} msat == budget_msat ${BUDGET_MSAT} msat (fixed-amount profile, K = ${K_MAX_PAYMENTS}).`);
 w();
 w('These `d_k` are the same three voucher values the v0.8.1 vectors carried, so');
 w('`C_0..C_3` and every signature below are byte-identical to that release; only');

@@ -43,9 +43,9 @@ delegated settlements. `C_0` is the pre-epoch base state (no vouchers);
 | `fee_proportional_millionths` | 5000 |
 | profile | fixed-amount (`ff_init` TLV 9 present, FFOR 7.6) |
 | `voucher_amounts_msat` (TLV 9, `d_1..d_3`) | 994000, 546250, 49749000 |
-| `budget_msat` | 100000000 |
-| `K` (`max_payments`) | 8 |
-| `min_payment_msat` | 10000 |
+| `budget_msat` (= sum of TLV 9) | 51289250 |
+| `K` (`max_payments`) | 3 |
+| `min_payment_msat` (= voucher dust floor, 546 sat) | 546000 |
 | `G` (`escape_granularity_msat`) | 0 (no escape set) |
 
 ### Secrets and seeds
@@ -98,11 +98,6 @@ R's point for commitment number 42 (the pre-epoch state).
 | 43 | `03dcd6df1422406c9e57514174169f8219e69e77605ee0de483f5c3bac773d6a58` |
 | 44 | `03e79f120b711e5dcc31d1b1c9a80fd3744179d76c2db74538af0370b9be0351a9` |
 | 45 | `02cb70d6bbd9e541cc97080c21554bb5bad9a97106bd8cddf87e58fff251843f52` |
-| 46 | `038c041ac5b8b09aa37b02efa89c1d26f6df8469eb05b59a11d44ac7e72a3da670` |
-| 47 | `02e953ce37edd88170a861951cbf645823619910f0cda873c89c5f353a80220c7b` |
-| 48 | `03331f11e8509d6e320c5a6baa800df600af9d9c50259c46a6245d424b314f7172` |
-| 49 | `020436bde8825c9dda02bc2a33ec27743436af4213b0c4920e522842722b5bd3e9` |
-| 50 | `02902437ce9a77d399f68dff0c2a1d6d161c30884c4955bcb4b4bbd33fce66a4cd` |
 
 ### `S` per-commitment material at `n0` (H_1 binding, FFOR §7.2/§12.1)
 
@@ -121,11 +116,12 @@ HTLC must deliver `gross_into_S(d_k) = d_k + fee_S(d_k)` where
 `S` checks `amt_to_forward == d_k` and `amount_msat - d_k >= fee_S(d_k)`.
 All voucher HTLCs use `cltv_expiry = T_exp = 800000`.
 
-> Note: `d_2 = 546,250 msat` gives a 546 sat output, exactly at the voucher
-> dust floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero
-> under `option_anchors_zero_fee_htlc_tx`). The `>= dust_limit` boundary is
-> intentionally exercised; one millisatoshi less would trim and a compliant
-> `S` MUST reject it at setup (FFOR §7.6, §8).
+> Note: `d_2 = 546,250 msat` gives a 546 sat output, at the voucher dust
+> floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero under
+> `option_anchors_zero_fee_htlc_tx`) with a 250 msat sub-satoshi remainder.
+> The trim boundary itself is `546,000` msat accepted and `545,999` msat
+> trimmed (A.5); a compliant `S` MUST reject a trimming `d_k` at setup
+> (FFOR §7.6, §8).
 
 | k | d_k (voucher) msat | fee_S(d_k) msat | gross_into_S msat | v_k output (sat) | preimage P_k | payment_hash H_k |
 |---|---|---|---|---|---|---|
@@ -133,7 +129,7 @@ All voucher HTLCs use `cltv_expiry = T_exp = 800000`.
 | 2 | 546250 | 3731 | 549981 | 546 | `0202020202020202020202020202020202020202020202020202020202020202` | `75877bb41d393b5fb8455ce60ecd8dda001d06316496b14dfa7f895656eeca4a` |
 | 3 | 49749000 | 249745 | 49998745 | 49749 | `0303030303030303030303030303030303030303030303030303030303030303` | `648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b` |
 
-Cumulative voucher value: 51289250 msat <= budget 100000000 msat.
+Cumulative voucher value: 51289250 msat == budget_msat 51289250 msat (fixed-amount profile, K = 3).
 
 These `d_k` are the same three voucher values the v0.8.1 vectors carried, so
 `C_0..C_3` and every signature below are byte-identical to that release; only

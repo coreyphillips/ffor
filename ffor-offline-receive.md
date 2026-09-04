@@ -21,9 +21,10 @@
   amount, the voucher amount and the amount `S` expects upstream: the payee amount is
   `d_k`, `S`'s compensation is the ordinary forwarding fee of the `S`→`R` hop, published
   to the payer in the route hint or blinded `payment_relay`, and the voucher pays
-  exactly `d_k`. Fixed-amount profiles bind every `(H_k, d_k)` pair into both signed
-  setup messages, the tower verifies a voucher against that precommitted amount rather
-  than against `S`'s report of what arrived, and the checks are equalities. Amountless
+  exactly `d_k`. Fixed-amount profiles put every `d_k` on the wire under both node-key
+  signatures (the mutual binding of each pair to one transcript is #22's), the tower
+  verifies a voucher against that precommitted amount rather than against `S`'s report
+  of what arrived, and the checks are equalities. Amountless
   operation remains for Variants A and B with an explicitly weaker attestation. See
   §7.6 and §17.2. Appendix A's inputs are restated in the new terms; every commitment,
   txid and signature is byte-identical to v0.8.1.
@@ -342,7 +343,7 @@ with this message's TLV 9 by the same index.
 | `s_commitment_number` (`n0`) | u64 | explicit, to anchor evidence |
 | TLV 1: `payment_hashes` | K×32 | Variants A and D: `S`-generated. In **Variant A only**, **`H_1` MUST equal `SHA256(per_commitment_secret_S[n0])`** (§12.1). In **Variant D** that binding MUST NOT be used (see below) |
 | TLV 7: `s_htlc_id_base` | u64 | the HTLC id `S` assigns to voucher `seq 1`; voucher `seq i` gets id `base + i − 1`. Required: `R` cannot otherwise observe `S`'s offer counter, and reconciliation ends with `j` live HTLCs both sides must address by id. |
-| TLV 9: `voucher_amounts_msat` | K×u64 | REQUIRED iff `ff_init` carried TLV 9, and MUST be byte-identical to it. `S`'s signature over this message is what binds each `(H_k, d_k)` pair from `S`'s side (§7.6) |
+| TLV 9: `voucher_amounts_msat` | K×u64 | REQUIRED iff `ff_init` carried TLV 9, and MUST be byte-identical to it, so the amount list is under `S`'s signature as well as `R`'s (§7.6) |
 | `signature` | 64 | `S`'s node-key sig (proves `S` accepted budget/fee terms, hash set and, when present, the amount list) |
 
 Requirements:
@@ -353,9 +354,16 @@ Requirements:
   committed before any payment exists and in Variants A and B a slot that would be
   refused at payment time should never be offered to a payer.
 - `R` MUST reject an `ff_accept` whose TLV 9 is absent or differs from the one it
-  sent. After `ff_accept`, every `(H_k, d_k)` pair is fixed by two node-key
-  signatures, `R`'s on `ff_init` and `S`'s on `ff_accept`, and no later message may
-  change it.
+  sent. After `ff_accept` the amount list is under both node-key signatures. The
+  *pairing* of amounts with hashes is, in this version, under one: in Variants A and
+  D the hashes travel in `ff_accept`, so `S`'s signature covers the pairs and `R`'s
+  `ff_init` covers only the amounts; in Variant B the hashes travel in `ff_init`, so
+  `R`'s signature covers the pairs and `S`'s covers only the amounts. Neither message
+  commits to the other. A mutually signed transcript hash over both, which is what
+  makes every pair provable from either party's signature alone, is specified with
+  the activation state machine (issue #22). Until then a §12.2 proof about a pair
+  needs both signed messages retained together, and no later message may change
+  either.
 - In Variant A, `R` cannot verify the `H_1` binding at setup (it would require the
   secret); it is verified *ex post* at settlement 1 by checking
   `preimage·G == per_commitment_point_S[n0]`. A false binding is detectable, attributable
@@ -508,26 +516,49 @@ deducted from the voucher. This is the only fee `S` earns per payment: an
 implementation MUST NOT also skim the voucher, and MUST NOT charge the fee twice by
 placing it both in the route hint and in the invoice amount.
 
-**What `S` reads.** `S` decrypts its own onion hop payload as any forwarding node does.
-That payload's `amt_to_forward` is the amount the payer intends `R` to receive, and `S`
-compares it with the incoming `update_add_htlc.amount_msat`. `S` never needs the final
-hop payload, which is encrypted to `R` (§7.3), to run the amount checks.
+**What `S` reads.** `S` decrypts its own onion hop payload as any forwarding node does,
+and never needs the final hop payload, which is encrypted to `R` (§7.3). How it learns
+the amount the payer intends `R` to receive depends on the invoice type:
+
+- Under a BOLT 11 invoice the `S`→`R` hop is a plaintext route hint (`r` field) and
+  `S`'s payload carries `amt_to_forward` in the clear.
+- Under a BOLT 12 invoice the `S`→`R` hop is inside a blinded path. `S`'s payload
+  carries `encrypted_recipient_data` with `payment_relay`, not a plaintext amount, and
+  `S` MUST derive `amt_to_forward` from the incoming `amount_msat` by BOLT 4's inverse
+  formula: `amt_to_forward = ((amount_msat − fee_base_msat) · 10^6 + 10^6 +
+  fee_proportional_millionths − 1) / (10^6 + fee_proportional_millionths)`, integer
+  division, with the `ff_init` fee terms as the relay values. For a payer that
+  delivers exactly `gross_into_S(d_k)` this yields `d_k` exactly (the ceiling absorbs
+  the floor in `fee_S`); the payer, however, prices the path from the aggregated
+  `blinded_payinfo`, whose BOLT 4 construction rounds up at every step, so it can
+  deliver a few millisatoshi more (see "Blinded paths" below for the bound).
+
+In both cases `S` compares the derived `amt_to_forward` with `amount_msat`.
 
 **Fixed-amount profile** (`ff_init` TLV 9 present; always in Variant D). Before
 settling a delegated payment on `H_k`, `S` MUST verify, in addition to §8:
 
-1. `amt_to_forward == d_k`. Equality, not `≥`. A payer that overpays the payee amount
-   is failed, not partially credited: the voucher for `H_k` pays exactly `d_k`, and a
-   surplus would be value the invoice represented as `R`'s credit that `R` cannot
-   claim. A payer that underpays is failed as BOLT 4 requires of a final node. Both
-   failures use BOLT 4's forwarding-node form with `S` as the erring node (§8):
-   `temporary_node_failure`. BOLT 4 lets a final node reject any amount above what it
-   expected; `S` exercises that choice on `R`'s behalf for the one amount `R` signed
-   for, and a conforming payer paying a fixed-amount invoice never triggers it.
-2. `amount_msat − amt_to_forward ≥ fee_S(d_k)`; otherwise `fee_insufficient`, reporting
-   the `ff_init` fee terms as the outgoing channel's setting. Any excess over
-   `fee_S(d_k)` is fee overpayment the payer chose and belongs to `S`, exactly as for
-   any forwarding node. It is never `R`'s credit and no message represents it as such.
+1. `amt_to_forward == d_k` under a plaintext route hint: equality, not `≥`. Under a
+   blinded path, `d_k ≤ amt_to_forward ≤ d_k + rounding_slack(d_k)`, the slack being
+   the bound on BOLT 4's aggregation rounding given below, and nothing more. A payer
+   that overpays the payee amount beyond that is failed, not partially credited: the
+   voucher for `H_k` pays exactly `d_k`, and a surplus would be value the invoice
+   represented as `R`'s credit that `R` cannot claim. A payer that underpays is failed
+   as BOLT 4 requires of a final node. BOLT 4 lets a final node reject any amount
+   above what it expected; `S` exercises that choice on `R`'s behalf for the one
+   amount `R` signed for, and a conforming payer paying a fixed-amount invoice never
+   triggers it. Surplus inside the slack is fee rounding and belongs to `S`.
+2. `amount_msat − amt_to_forward ≥ fee_S(d_k)`. Any excess over `fee_S(d_k)` is fee
+   overpayment the payer chose and belongs to `S`, exactly as for any forwarding
+   node. It is never `R`'s credit and no message represents it as such. Under a
+   blinded path a conforming payer satisfies this by construction of the inverse
+   formula.
+
+Failure encoding follows BOLT 4 for the hop type. Under a plaintext route hint `S`
+fails as the erring forwarding node (§8): `temporary_node_failure` for check 1,
+`fee_insufficient` reporting the `ff_init` fee terms as the outgoing channel's setting
+for check 2. Under a blinded path `S` MUST return `invalid_onion_blinding` for every
+failure, as BOLT 4 requires of a blinded hop, and MUST NOT leak which check failed.
 
 The voucher then pays `v_k = d_k`. `R` MUST NOT sign an invoice for `H_k` at any amount
 other than `d_k`. `T` (§9.4) MUST verify `voucher_amount_msat == d_k` against the
@@ -557,7 +588,8 @@ enforcement therefore recovers `floor(d_k / 1000)` satoshis, and an `R` sizing s
 SHOULD choose whole-satoshi `d_k` where the difference matters.
 
 **Bounds.** `fee_base_msat` and `fee_proportional_millionths` are `u32`, so `fee_S` is
-never negative and `gross_into_S(d) > d` whenever either is non-zero. Implementations
+never negative and `gross_into_S(d) ≥ d`, with equality exactly when `fee_base_msat`
+is 0 and `d · fee_proportional_millionths < 10^6` (the proportional part floors to 0). Implementations
 MUST evaluate `d * fee_proportional_millionths` without overflow: in 128-bit arithmetic,
 or after checking `d ≤ floor((2^64 − 1) / fee_proportional_millionths)`. At setup, `S`
 and `R` MUST reject with `ff_error` any `d_k` for which that product or
@@ -566,19 +598,51 @@ and `R` MUST reject with `ff_error` any `d_k` for which that product or
 whose count exceeds `max_accepted_htlcs`, and any `d_k` whose output would trim (§8).
 In the fixed-amount profile these are setup-time rejections, never payment-time ones.
 
-**Reserve and weight.** The fixed-amount profile commits `Σ d_k` at setup (Variant D) or
-bounds it by `budget_msat` (A and B). `S`'s spendable balance MUST cover `budget_msat`
-plus the funder's commitment fee for `K` HTLC outputs (172 weight units each at the
-frozen feerate) plus `channel_reserve`, and `R`'s balance MUST likewise stay above its
-reserve when `R` is the funder (§8). These are checked at `ff_accept` in the
-fixed-amount profile, since Variant D adds every voucher before any payment.
+**Reserve, weight and the fee-spike buffer.** The fixed-amount profile commits `Σ d_k`
+at setup (Variant D) or bounds it by `budget_msat` (A and B). Two obligations are
+distinct and combine only when `S` is the funder (BOLT 3 charges the base commitment
+fee and both anchors to the funder, whoever that is):
 
-**Blinded paths.** When the invoice carries a BOLT 12 blinded path, the payer sees one
-aggregated `payment_relay` for the whole blinded portion. `S`'s hop inside the path
-still carries exactly `fee_base_msat` and `fee_proportional_millionths` from `ff_init`,
-and the aggregate is computed from the per-hop values by the BOLT 4 rule, so the
-payer's `amt_to_forward` at `S` is unchanged. Receipt-witness hops (a separate
-profile) add their own fees to the aggregate the same way; none of them changes `d_k`.
+- `S`, as the party whose balance the vouchers come out of, MUST hold
+  `budget_msat + S's channel_reserve` spendable.
+- The **funder**, whichever side that is, MUST additionally hold above its own reserve
+  the commitment fee for the base transaction plus `K` HTLC outputs (172 weight units
+  each) plus both anchors, evaluated at **twice the frozen `feerate_per_kw`**. This is
+  BOLT 2's fee-spike buffer, made mandatory rather than recommended: the vouchers
+  stay live for the whole epoch and past `T_exp`, `update_fee` cannot run while `R` is
+  offline, and a funder that reserved only the frozen fee could be unable to add the
+  first HTLC after reconciliation, or to afford a force-close, if fees doubled in the
+  meantime. When `R` is the funder this is the check §8 already requires against the
+  funder identity recorded at setup, with the buffer added.
+
+Both are checked at `ff_accept` in the fixed-amount profile, since Variant D adds every
+voucher before any payment.
+
+**Blinded paths.** A BOLT 11 invoice carries plaintext route hints and cannot carry
+blinded-path fields; blinded paths are a BOLT 12 invoice feature. There the payer
+sees one aggregated `blinded_payinfo` for the whole blinded portion, computed by the
+path's creator from the per-hop `payment_relay` values with BOLT 4's formulas, which
+round **up** at every step. `S`'s own `payment_relay` carries exactly `fee_base_msat`
+and `fee_proportional_millionths` from `ff_init`; receipt-witness hops (a separate
+profile) add their own relay values the same way, and none of them changes `d_k`.
+
+The rounding is why check 1 has a slack under blinded paths. With `N` blinded hops up
+to and including `S`: each of the `N − 1` aggregation steps adds less than 1 msat of
+base fee and less than 1 ppm of proportional fee; the payer's own rounding of the
+proportional fee adds less than 1 msat; and each hop's ceiling in the inverse formula
+adds less than 1 msat to what it forwards. The inverse formula passes an excess
+through at most undiminished, so the amount reaching `S`'s derivation exceeds `d_k` by
+less than `2·N + ceil(N · d_k / 10^6)` msat. This version fixes
+
+```
+N = 8
+rounding_slack(d) = 2·N + 1 + ceil(N · d / 1000000) = 17 + ceil(d / 125000)  msat
+```
+
+and `R` MUST NOT sign an invoice whose blinded path has more than `N` hops before and
+including `S`. The slack is sub-satoshi below `d = 125` sat and below one part in
+`125,000` of `d` above it; it is `S`'s, as fee rounding is for any blinded hop, and an
+`R` that prices to the millisatoshi MAY fold the expected rounding into `d_k`.
 
 **MPP.** This version forbids MPP for delegated payments (§13.1). If a later version
 enables it, `total_msat` across parts MUST equal `d_k` and check 1 applies to the sum,
@@ -586,11 +650,16 @@ not to each part.
 
 **Attestation.** After a fixed-amount settlement, four parties can each prove a
 different thing. The payer holds `R`'s signed invoice for `d_k` and the preimage: proof
-that `R` can claim exactly `d_k` (§13.3). `S` holds the signed `ff_init` and
-`ff_accept`: proof that `R` requested and `S` accepted `(H_k, d_k)`. `T` (Variant B) or
-`R` (on return) holds the package: proof of `S`'s promise to credit `d_k`. Nobody except
-`S` and the payer holds proof of what arrived at `S`, and the fixed-amount profile is
-designed so that nobody needs it.
+that `R`'s signed request for exactly `d_k` was paid. Whether that is also proof that
+`R` holds an *enforceable* claim for `d_k` depends on the variant: yes in Variant D,
+where the voucher and its HTLC-success signature exist from setup; yes in Variant B,
+where `T` held the verified package before the preimage left it; in Variant A only once
+the package for that settlement has reached `R` or its mailbox, since `R`'s on-chain
+claim needs `S`'s signature on `C_i^R` (§13.3). `S` holds the signed `ff_init` and
+`ff_accept`: proof that `R` requested and `S` accepted `(H_k, d_k)` (subject to the
+pairing caveat in §7.2). `T` (Variant B) or `R` (on return) holds the package: proof
+of `S`'s promise to credit `d_k`. Nobody except `S` and the payer holds proof of what
+arrived at `S`, and the fixed-amount profile is designed so that nobody needs it.
 
 Arithmetic vectors for `fee_S` and `gross_into_S`, including the rounding, dust and
 overflow boundaries, are in Appendix A.5 (`ffor-test-vectors.md`).
@@ -960,14 +1029,14 @@ uniform amount `G`, with `budget = M · G`. Because knowing `x_m` derives every 
 - Invoices MUST be served strictly in ascending level order and MUST NOT be reused
   (§13.7). Revealing `x_m` publishes the preimage of every invoice at a level below `m`,
   so an unserved lower-level invoice would become claimable by any node on its route.
-- Arbitrary multiples of `G`: `R` pre-signs one fixed-amount invoice per
-  `(from_level p, to_level j)` pair, amount `(j − p)·G` with `S`'s fee in the route
-  hint as always (§7.6), `payment_hash = x_{j−1}`.
-  `S` serves the pair matching the current level and the payer's amount. That is
-  `M(M+1)/2` invoices; at `M = 100`, 5050 pre-signed invoices, a fraction of a second to
-  produce and ~1.5 MB to ship. That is roughly 24 chunks of §7.3's `ff_invoices`, and it
-  is a reason to prefer out-of-band distribution (which §13.7 recommends on independent
-  grounds) rather than pushing the whole set across the channel.
+- **One level per payment.** Every voucher in the chain has `d_j = G` (TLV 9 carries
+  `M` copies of `G`), and the invoice for level `j` is for exactly `G` with
+  `payment_hash = x_{j−1}`. An invoice for several levels at once, amount `(j − p)·G`
+  on hash `x_{j−1}`, is **not** permitted in this version: it would reuse `H_j` at an
+  amount other than `d_j`, and an honest `S` running §7.6 check 1 would fail it. A
+  payer owing `n·G` pays `n` level invoices in turn (MPP is disabled, §13.1). Amounts
+  that are not a multiple of `G`, and multi-level jumps, wait for transition-specific
+  descriptors (issue #23) and are deferred.
 - Fixed-amount invoices also repair §13.3: amount attestation stops being
   amountless-grade, because the invoice `R` signed states the amount.
 - `S` lying about the current level (serving a `(p, j)` pair whose `p` is below the true
@@ -1393,11 +1462,15 @@ invoice material while FFOR supplies the settlement half. Track and align.
 
 ### 13.3 Amount-binding in receipts
 In the fixed-amount profile (§7.6) the payer's receipt is `R`'s signed invoice for
-exactly `d_k` plus the preimage, and it proves that `R` can claim exactly `d_k`: `S`
-reveals `t_k` only by settling, and a conforming `S` settles only at
-`amt_to_forward == d_k`. A non-conforming `S` that settles at a lower amount gains
-nothing, since the voucher still pays `d_k`. This is stronger than an ordinary online
-receipt, which attests the invoice amount but not an overpayment. In the amountless
+exactly `d_k` plus the preimage, and it proves that `R`'s request for exactly `d_k` was
+paid: `S` reveals `t_k` only by settling, and a conforming `S` settles only at
+`amt_to_forward == d_k` (within the blinded-path slack). In Variants B and D that is
+also proof that `R` holds an enforceable claim for `d_k`, because the voucher's
+signatures exist before the preimage is released. In Variant A it is not, until the
+settlement package reaches `R`: the receipt proves payment of the request, and the
+package proves the claim. A non-conforming `S` that settles at a lower amount gains
+nothing, since the voucher still pays `d_k`. Where it holds, this is stronger than an
+ordinary online receipt, which attests the invoice amount but not an overpayment. In the amountless
 profile the receipt proves *a* payment, not its size; the signed settlement package,
 which states `htlc_amount_msat`, partially repairs this, but the package is `S`'s own
 report (§7.6). PTLCs would repair the amountless case properly.
@@ -1712,7 +1785,10 @@ these respects.
 | 5 | §9.4 | `T` checked `voucher_amount == htlc_amount − fee(htlc_amount)`, i.e. against `S`'s own report | `T` checks `voucher_amount == d_seq` from provisioning; `htlc_amount` is never an input to the expected voucher amount |
 | 6 | §7.1 | `budget_msat` an upper bound in every variant | Fixed-amount profile: MUST equal `Σ d_k` |
 | 7 | §7.6 | No overflow or bounds rule | `d × ppm` and `gross_into_S` bounded by `2^64 − 1` and checked at setup; trimming, `htlc_minimum_msat`, in-flight and slot limits checked at setup in the fixed-amount profile |
-| 8 | Appendix A | Inputs were incoming HTLC amounts, vouchers derived | Inputs are the payee amounts `d_k`; incoming amounts derived. Every commitment, txid and signature is byte-identical to v0.8.1. New A.5 arithmetic vectors |
+| 8 | Appendix A | Inputs were incoming HTLC amounts, vouchers derived; `K = 8`, `budget` and `min_payment_msat` inconsistent with the fixed-amount rules | Inputs are the payee amounts `d_k`; incoming amounts derived; `K = 3`, `budget = Σ d_k`, `min_payment_msat` at the dust floor. Every commitment, txid and signature is byte-identical to v0.8.1. New A.5 arithmetic vectors |
+| 9 | §7.6 | Funder and `S` obligations conflated; fee reserved at the frozen feerate only | `S` covers budget plus its reserve; the funder, whichever side, covers base fee, `K` HTLC outputs and both anchors at twice the frozen feerate above its reserve |
+| 10 | §7.6 | `S` reads plaintext `amt_to_forward` | Plaintext under a BOLT 11 route hint; under a BOLT 12 blinded path `S` derives it by BOLT 4's inverse formula, check 1 admits `rounding_slack(d_k)` with `N = 8`, and every failure is `invalid_onion_blinding` |
+| 11 | §9.5.4 | Multi-level hash-chain invoices `(p, j)` of amount `(j − p)·G` | One level per invoice, amount `G`; multi-level and non-multiple amounts deferred to #23 |
 
 Editorial only: §3 gains `d_k` and `fee_S`; §9.2, §12.1, §12.4 and §13.3 now
 distinguish the fixed-amount and amountless profiles; §11.3 says what the advertised
