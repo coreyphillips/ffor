@@ -39,8 +39,10 @@ delegated settlements. `C_0` is the pre-epoch base state (no vouchers);
 | `n0` | 42 |
 | `T_exp` (`voucher_expiry`, uniform `cltv_expiry`) | 800000 |
 | `D` (`settlement_deadline`) | 799000 |
-| `fee_base_msat` | 1000 |
+| `fee_base_msat` (S->R hop forwarding fee, FFOR 7.6) | 1000 |
 | `fee_proportional_millionths` | 5000 |
+| profile | fixed-amount (`ff_init` TLV 9 present, FFOR 7.6) |
+| `voucher_amounts_msat` (TLV 9, `d_1..d_3`) | 994000, 546250, 49749000 |
 | `budget_msat` | 100000000 |
 | `K` (`max_payments`) | 8 |
 | `min_payment_msat` | 10000 |
@@ -112,25 +114,31 @@ R's point for commitment number 42 (the pre-epoch state).
 
 ## A.2 Delegated payments and voucher values
 
-`fee(a) = fee_base_msat + a * fee_proportional_millionths / 10^6`;
-`v_k = htlc_amount_k - fee(htlc_amount_k)`. All voucher HTLCs use
-`cltv_expiry = T_exp = 800000`.
+FFOR 7.6, fixed-amount profile. The inputs are the payee amounts `d_k`
+(`ff_init` TLV 9); the voucher pays exactly `v_k = d_k`, and the incoming
+HTLC must deliver `gross_into_S(d_k) = d_k + fee_S(d_k)` where
+`fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)`.
+`S` checks `amt_to_forward == d_k` and `amount_msat - d_k >= fee_S(d_k)`.
+All voucher HTLCs use `cltv_expiry = T_exp = 800000`.
 
-> Note: payment 2 was originally scripted as 250,000 msat, but that yields
-> `v_2 = 247,750 msat`, below the voucher dust floor (`dust_limit` 546 sat;
-> the second-level HTLC fee term is zero under
-> `option_anchors_zero_fee_htlc_tx`), so a compliant `S` MUST reject it
-> (FFOR §8). It is bumped to the smallest round amount that does not trim:
-> 550,000 msat, giving `v_2 = 546,250 msat` → a 546 sat output, exactly at
-> the floor (the `>= dust_limit` boundary is intentionally exercised).
+> Note: `d_2 = 546,250 msat` gives a 546 sat output, exactly at the voucher
+> dust floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero
+> under `option_anchors_zero_fee_htlc_tx`). The `>= dust_limit` boundary is
+> intentionally exercised; one millisatoshi less would trim and a compliant
+> `S` MUST reject it at setup (FFOR §7.6, §8).
 
-| k | htlc_amount_msat | fee(a) msat | v_k msat | v_k output (sat) | preimage P_k | payment_hash H_k |
+| k | d_k (voucher) msat | fee_S(d_k) msat | gross_into_S msat | v_k output (sat) | preimage P_k | payment_hash H_k |
 |---|---|---|---|---|---|---|
-| 1 | 1000000 | 6000 | 994000 | 994 | `ab002fc41c2817140d1384ccdfb6e7f4da730edeac39c08375b2b35eb8654b77` | `e4436ccb23764c40624d579e288c09f8da56f0994b1d54cd44c4f9d7923bfe96` |
-| 2 | 550000 | 3750 | 546250 | 546 | `0202020202020202020202020202020202020202020202020202020202020202` | `75877bb41d393b5fb8455ce60ecd8dda001d06316496b14dfa7f895656eeca4a` |
-| 3 | 50000000 | 251000 | 49749000 | 49749 | `0303030303030303030303030303030303030303030303030303030303030303` | `648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b` |
+| 1 | 994000 | 5970 | 999970 | 994 | `ab002fc41c2817140d1384ccdfb6e7f4da730edeac39c08375b2b35eb8654b77` | `e4436ccb23764c40624d579e288c09f8da56f0994b1d54cd44c4f9d7923bfe96` |
+| 2 | 546250 | 3731 | 549981 | 546 | `0202020202020202020202020202020202020202020202020202020202020202` | `75877bb41d393b5fb8455ce60ecd8dda001d06316496b14dfa7f895656eeca4a` |
+| 3 | 49749000 | 249745 | 49998745 | 49749 | `0303030303030303030303030303030303030303030303030303030303030303` | `648aa5c579fb30f38af744d97d6ec840c7a91277a499a0d780f3e7314eca090b` |
 
 Cumulative voucher value: 51289250 msat <= budget 100000000 msat.
+
+These `d_k` are the same three voucher values the v0.8.1 vectors carried, so
+`C_0..C_3` and every signature below are byte-identical to that release; only
+the derived incoming amounts changed (v0.8.1 listed 1,000,000 / 550,000 /
+50,000,000 msat incoming with the fee skimmed from them).
 
 `P_1` is `per_commitment_secret_S[n0]` per the Variant-A `H_1` binding;
 `P_2`/`P_3` are the documented constants above (Appendix C style).
@@ -430,7 +438,38 @@ and the HTLC-success transactions were decoded with Bitcoin Core 29.1
 `decoderawtransaction`, which reports the same txids, prevouts, values,
 sequences, and locktimes as listed above.
 
-## A.5 How to regenerate
+## A.5 Fee arithmetic vectors (FFOR §7.6)
+
+`fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)` and
+`gross_into_S(d) = d + fee_S(d)`, both in millisatoshi, with `d * ppm` and the
+gross bounded by `2^64 - 1`. REJECTED rows are inputs an implementation MUST
+refuse at setup with `ff_error` (FFOR §7.6 bounds, §8 dust floor); their
+arithmetic columns are shown for the accepted boundary one step away.
+
+| case | d (msat) | fee_base_msat | fee_ppm | fee_S(d) | gross_into_S(d) | output (sat) |
+|---|---|---|---|---|---|---|
+| base only | 994000 | 1000 | 0 | 1000 | 995000 | 994 |
+| ppm only | 994000 | 0 | 5000 | 4970 | 998970 | 994 |
+| mixed, A.2 payment 1 | 994000 | 1000 | 5000 | 5970 | 999970 | 994 |
+| mixed, A.2 payment 2 | 546250 | 1000 | 5000 | 3731 | 549981 | 546 |
+| mixed, A.2 payment 3 | 49749000 | 1000 | 5000 | 249745 | 49998745 | 49749 |
+| rounding: 1 msat at 1 ppm floors to 0 | 1 | 0 | 1 | 0 | 1 | 0 |
+| rounding: 999,999 msat at 1 ppm | 999999 | 0 | 1 | 0 | 999999 | 999 |
+| rounding: 1,000,001 msat at 1 ppm | 1000001 | 0 | 1 | 1 | 1000002 | 1000 |
+| dust floor: d = 546,000 (546 sat, accepted) | 546000 | 1000 | 5000 | 3730 | 549730 | 546 |
+| dust floor: d = 545,999 (545 sat, REJECTED at setup, §8) | 545999 | 1000 | 5000 | 3729 | 549728 | 545 |
+| base at u32 max | 1000000 | 4294967295 | 0 | 4294967295 | 4295967295 | 1000 |
+| ppm at u32 max | 1000000 | 0 | 4294967295 | 4294967295 | 4295967295 | 1000 |
+| overflow boundary: d * ppm == 2^64 - 1 (accepted) | 4294967297 | 0 | 4294967295 | 18446744073709 | 18451039041006 | 4294967 |
+| overflow: d * ppm > 2^64 - 1 (REJECTED at setup) | 4294967298 | 0 | 4294967295 | overflow | overflow | 4294967 |
+| overflow boundary: gross == 2^64 - 1 (accepted) | 18446744069414584320 | 4294967295 | 0 | 4294967295 | 18446744073709551615 | 18446744069414584 |
+| overflow: gross > 2^64 - 1 (REJECTED at setup) | 18446744069414584321 | 4294967295 | 0 | overflow | overflow | 18446744069414584 |
+
+`2^64 - 1 = 18446744073709551615`; `2^32 - 1 = 4294967295`. The two overflow
+boundaries are exact: `4294967297 * 4294967295 = 2^64 - 1`, and
+`18446744069414584320 + 4294967295 = 2^64 - 1`.
+
+## A.6 How to regenerate
 
 ```sh
 cd <beignet repo>   # sibling of the specs repo, master branch
@@ -443,7 +482,7 @@ imports beignet from source (`../beignet/src/lightning/...`) and writes this
 entire file to stdout. Output is deterministic: running it twice yields
 byte-identical results.
 
-## A.6 Deviations / spec feedback
+## A.7 Deviations / spec feedback
 
 1. **`commitment_sig` size (§9.1):** the `ff_settlement` field table says
    64 bytes (compact), matching BOLT 2 wire signatures. These vectors give
@@ -455,7 +494,7 @@ byte-identical results.
    `dust_limit`, since every channel this spec permits carries
    `option_anchors` and its second-level HTLC transactions are zero-fee.
    The scripted 250,000 msat payment 2 trims at these parameters and was
-   bumped to 550,000 msat (see A.2).
+   Vouchers are sized so `d_2` sits exactly on that floor (see A.2).
 3. **Sub-satoshi remainders (§8):** the offerer's balance is reduced by the
    full millisatoshi `v_k` and every output is floored, so the truncated
    remainder raises the on-chain fee rather than returning to `S`. Vectors

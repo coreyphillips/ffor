@@ -206,15 +206,20 @@ const R_BALANCE_MSAT_PRE = 3_000_000_000n;
 // Two 330 sat anchors, charged to the funder alongside the base commitment fee.
 const ANCHOR_TOTAL_SAT = 660n;
 
-// Delegated payments. Payment 2 was specified as 250,000 msat, but
-// v = 0.995a - 1000 gives 247,750 msat < the 546,000 msat voucher dust floor
-// (dust_limit 546 sat; zero-fee second-level HTLC txs under option_anchors),
-// so it is bumped to the smallest round value that does not trim: 550,000 msat
-// (v_2 = 546,250 msat -> 546 sat output, exactly at the floor).
-const HTLC_AMOUNTS_MSAT = [1_000_000n, 550_000n, 50_000_000n];
+// Delegated payments, as payee amounts d_k (FFOR 7.6, fixed-amount profile:
+// ff_init TLV 9). These are the voucher values, unchanged from the v0.8.1
+// vectors, so every commitment below is byte-identical to that release; what
+// changed is that the incoming HTLC amount is now derived from d_k (gross =
+// d_k + fee_S(d_k)) rather than the voucher being derived from the incoming
+// amount. d_2 = 546,250 msat sits exactly at the voucher dust floor (546 sat
+// output; dust_limit 546 sat; zero-fee second-level HTLC txs under
+// option_anchors), so the >= dust_limit boundary is exercised on purpose.
+const VOUCHER_AMOUNTS_MSAT = [994_000n, 546_250n, 49_749_000n];
 
-function skimFee(a: bigint): bigint {
-	return FEE_BASE_MSAT + (a * FEE_PROP_MILLIONTHS) / 1_000_000n;
+// FFOR 7.6: S's forwarding fee for the S->R hop, BOLT 7's formula with
+// integer division, evaluated on the PAYEE amount.
+function forwardingFee(d: bigint): bigint {
+	return FEE_BASE_MSAT + (d * FEE_PROP_MILLIONTHS) / 1_000_000n;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,14 +303,13 @@ const S_PC_POINT_N0 = perCommitmentPointFromSecret(P1);
 // Other preimages follow the Appendix C style (repeated bytes).
 const PREIMAGES = [P1, Buffer.alloc(32, 0x02), Buffer.alloc(32, 0x03)];
 
-const vouchers: IVoucher[] = HTLC_AMOUNTS_MSAT.map((a, idx) => {
-	const feeMsat = skimFee(a);
-	const vMsat = a - feeMsat;
+const vouchers: IVoucher[] = VOUCHER_AMOUNTS_MSAT.map((d, idx) => {
+	const feeMsat = forwardingFee(d);
 	return {
 		seq: idx + 1,
-		htlcAmountMsat: a,
+		htlcAmountMsat: d + feeMsat, // gross_into_S(d_k)
 		feeMsat,
-		vMsat,
+		vMsat: d,
 		preimage: PREIMAGES[idx],
 		paymentHash: sha256(PREIMAGES[idx])
 	};
@@ -317,8 +321,13 @@ const vouchers: IVoucher[] = HTLC_AMOUNTS_MSAT.map((a, idx) => {
 let cumulative = 0n;
 for (const v of vouchers) {
 	assert(
-		v.htlcAmountMsat >= MIN_PAYMENT_MSAT,
-		`payment ${v.seq}: htlc_amount >= min_payment_msat`
+		v.vMsat >= MIN_PAYMENT_MSAT,
+		`payment ${v.seq}: d_${v.seq} >= min_payment_msat`
+	);
+	// FFOR 7.6 check 2, as S runs it on the incoming HTLC.
+	assert(
+		v.htlcAmountMsat - v.vMsat >= forwardingFee(v.vMsat),
+		`payment ${v.seq}: incoming HTLC pays fee_S(d_${v.seq})`
 	);
 	assert(
 		v.vMsat / 1000n >= DUST_LIMIT_SAT,
@@ -688,8 +697,12 @@ w(`| \`n_R\` | ${N_R} (so \`C_i^R\` is R's commitment number ${N_R} + i) |`);
 w(`| \`n0\` | ${N0} |`);
 w(`| \`T_exp\` (\`voucher_expiry\`, uniform \`cltv_expiry\`) | ${T_EXP} |`);
 w(`| \`D\` (\`settlement_deadline\`) | ${D_DEADLINE} |`);
-w(`| \`fee_base_msat\` | ${FEE_BASE_MSAT} |`);
+w(`| \`fee_base_msat\` (S->R hop forwarding fee, FFOR 7.6) | ${FEE_BASE_MSAT} |`);
 w(`| \`fee_proportional_millionths\` | ${FEE_PROP_MILLIONTHS} |`);
+w(`| profile | fixed-amount (\`ff_init\` TLV 9 present, FFOR 7.6) |`);
+w(
+	`| \`voucher_amounts_msat\` (TLV 9, \`d_1..d_3\`) | ${VOUCHER_AMOUNTS_MSAT.join(', ')} |`
+);
 w(`| \`budget_msat\` | ${BUDGET_MSAT} |`);
 w(`| \`K\` (\`max_payments\`) | ${K_MAX_PAYMENTS} |`);
 w(`| \`min_payment_msat\` | ${MIN_PAYMENT_MSAT} |`);
@@ -756,27 +769,33 @@ w(`| \`H_1 = SHA256(P_1)\` | \`${hex(vouchers[0].paymentHash)}\` |`);
 w();
 w('## A.2 Delegated payments and voucher values');
 w();
-w('`fee(a) = fee_base_msat + a * fee_proportional_millionths / 10^6`;');
-w('`v_k = htlc_amount_k - fee(htlc_amount_k)`. All voucher HTLCs use');
-w(`\`cltv_expiry = T_exp = ${T_EXP}\`.`);
+w('FFOR 7.6, fixed-amount profile. The inputs are the payee amounts `d_k`');
+w('(`ff_init` TLV 9); the voucher pays exactly `v_k = d_k`, and the incoming');
+w('HTLC must deliver `gross_into_S(d_k) = d_k + fee_S(d_k)` where');
+w('`fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)`.');
+w('`S` checks `amt_to_forward == d_k` and `amount_msat - d_k >= fee_S(d_k)`.');
+w(`All voucher HTLCs use \`cltv_expiry = T_exp = ${T_EXP}\`.`);
 w();
-w('> Note: payment 2 was originally scripted as 250,000 msat, but that yields');
-w('> `v_2 = 247,750 msat`, below the voucher dust floor (`dust_limit` 546 sat;');
-w('> the second-level HTLC fee term is zero under');
-w('> `option_anchors_zero_fee_htlc_tx`), so a compliant `S` MUST reject it');
-w('> (FFOR §8). It is bumped to the smallest round amount that does not trim:');
-w('> 550,000 msat, giving `v_2 = 546,250 msat` → a 546 sat output, exactly at');
-w('> the floor (the `>= dust_limit` boundary is intentionally exercised).');
+w('> Note: `d_2 = 546,250 msat` gives a 546 sat output, exactly at the voucher');
+w('> dust floor (`dust_limit` 546 sat; the second-level HTLC fee term is zero');
+w('> under `option_anchors_zero_fee_htlc_tx`). The `>= dust_limit` boundary is');
+w('> intentionally exercised; one millisatoshi less would trim and a compliant');
+w('> `S` MUST reject it at setup (FFOR §7.6, §8).');
 w();
-w('| k | htlc_amount_msat | fee(a) msat | v_k msat | v_k output (sat) | preimage P_k | payment_hash H_k |');
+w('| k | d_k (voucher) msat | fee_S(d_k) msat | gross_into_S msat | v_k output (sat) | preimage P_k | payment_hash H_k |');
 w('|---|---|---|---|---|---|---|');
 for (const v of vouchers) {
 	w(
-		`| ${v.seq} | ${v.htlcAmountMsat} | ${v.feeMsat} | ${v.vMsat} | ${v.vMsat / 1000n} | \`${hex(v.preimage)}\` | \`${hex(v.paymentHash)}\` |`
+		`| ${v.seq} | ${v.vMsat} | ${v.feeMsat} | ${v.htlcAmountMsat} | ${v.vMsat / 1000n} | \`${hex(v.preimage)}\` | \`${hex(v.paymentHash)}\` |`
 	);
 }
 w();
 w(`Cumulative voucher value: ${cumulative} msat <= budget ${BUDGET_MSAT} msat.`);
+w();
+w('These `d_k` are the same three voucher values the v0.8.1 vectors carried, so');
+w('`C_0..C_3` and every signature below are byte-identical to that release; only');
+w('the derived incoming amounts changed (v0.8.1 listed 1,000,000 / 550,000 /');
+w('50,000,000 msat incoming with the fee skimmed from them).');
 w();
 w('`P_1` is `per_commitment_secret_S[n0]` per the Variant-A `H_1` binding;');
 w('`P_2`/`P_3` are the documented constants above (Appendix C style).');
@@ -895,7 +914,77 @@ w('and the HTLC-success transactions were decoded with Bitcoin Core 29.1');
 w('`decoderawtransaction`, which reports the same txids, prevouts, values,');
 w('sequences, and locktimes as listed above.');
 w();
-w('## A.5 How to regenerate');
+// ─────────────────────────────────────────────────────────────────────────────
+// A.5 fee arithmetic vectors (FFOR 7.6): computed here in BigInt, with the
+// overflow boundary checked exactly, so an implementation can pin its own
+// fee_S / gross_into_S against them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const U64_MAX = (1n << 64n) - 1n;
+const U32_MAX = (1n << 32n) - 1n;
+
+interface IFeeVector {
+	name: string;
+	d: bigint;
+	base: bigint;
+	ppm: bigint;
+}
+
+function feeS(d: bigint, base: bigint, ppm: bigint): bigint | null {
+	// FFOR 7.6 bounds: reject (null) if d * ppm or gross would exceed 2^64 - 1.
+	if (ppm > 0n && d > U64_MAX / ppm) return null;
+	const fee = base + (d * ppm) / 1_000_000n;
+	if (d + fee > U64_MAX) return null;
+	return fee;
+}
+
+const FEE_VECTORS: IFeeVector[] = [
+	{ name: 'base only', d: 994_000n, base: 1000n, ppm: 0n },
+	{ name: 'ppm only', d: 994_000n, base: 0n, ppm: 5000n },
+	{ name: 'mixed, A.2 payment 1', d: 994_000n, base: 1000n, ppm: 5000n },
+	{ name: 'mixed, A.2 payment 2', d: 546_250n, base: 1000n, ppm: 5000n },
+	{ name: 'mixed, A.2 payment 3', d: 49_749_000n, base: 1000n, ppm: 5000n },
+	{ name: 'rounding: 1 msat at 1 ppm floors to 0', d: 1n, base: 0n, ppm: 1n },
+	{ name: 'rounding: 999,999 msat at 1 ppm', d: 999_999n, base: 0n, ppm: 1n },
+	{ name: 'rounding: 1,000,001 msat at 1 ppm', d: 1_000_001n, base: 0n, ppm: 1n },
+	{ name: 'dust floor: d = 546,000 (546 sat, accepted)', d: 546_000n, base: 1000n, ppm: 5000n },
+	{ name: 'dust floor: d = 545,999 (545 sat, REJECTED at setup, §8)', d: 545_999n, base: 1000n, ppm: 5000n },
+	{ name: 'base at u32 max', d: 1_000_000n, base: U32_MAX, ppm: 0n },
+	{ name: 'ppm at u32 max', d: 1_000_000n, base: 0n, ppm: U32_MAX },
+	{ name: 'overflow boundary: d * ppm == 2^64 - 1 (accepted)', d: U64_MAX / U32_MAX, base: 0n, ppm: U32_MAX },
+	{ name: 'overflow: d * ppm > 2^64 - 1 (REJECTED at setup)', d: U64_MAX / U32_MAX + 1n, base: 0n, ppm: U32_MAX },
+	{ name: 'overflow boundary: gross == 2^64 - 1 (accepted)', d: U64_MAX - U32_MAX, base: U32_MAX, ppm: 0n },
+	{ name: 'overflow: gross > 2^64 - 1 (REJECTED at setup)', d: U64_MAX - U32_MAX + 1n, base: U32_MAX, ppm: 0n }
+];
+
+// Pin the A.2 payments to the vector table (same formula, same numbers).
+for (const v of vouchers) {
+	assert(feeS(v.vMsat, FEE_BASE_MSAT, FEE_PROP_MILLIONTHS) === v.feeMsat, `A.5 pins A.2 payment ${v.seq}`);
+}
+assert((U64_MAX / U32_MAX) * U32_MAX === U64_MAX, 'A.5 overflow boundary is exact');
+
+w('## A.5 Fee arithmetic vectors (FFOR §7.6)');
+w();
+w('`fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)` and');
+w('`gross_into_S(d) = d + fee_S(d)`, both in millisatoshi, with `d * ppm` and the');
+w('gross bounded by `2^64 - 1`. REJECTED rows are inputs an implementation MUST');
+w('refuse at setup with `ff_error` (FFOR §7.6 bounds, §8 dust floor); their');
+w('arithmetic columns are shown for the accepted boundary one step away.');
+w();
+w('| case | d (msat) | fee_base_msat | fee_ppm | fee_S(d) | gross_into_S(d) | output (sat) |');
+w('|---|---|---|---|---|---|---|');
+for (const fv of FEE_VECTORS) {
+	const fee = feeS(fv.d, fv.base, fv.ppm);
+	const feeCol = fee === null ? 'overflow' : fee.toString();
+	const grossCol = fee === null ? 'overflow' : (fv.d + fee).toString();
+	w(`| ${fv.name} | ${fv.d} | ${fv.base} | ${fv.ppm} | ${feeCol} | ${grossCol} | ${fv.d / 1000n} |`);
+}
+w();
+w('`2^64 - 1 = 18446744073709551615`; `2^32 - 1 = 4294967295`. The two overflow');
+w('boundaries are exact: `4294967297 * 4294967295 = 2^64 - 1`, and');
+w('`18446744069414584320 + 4294967295 = 2^64 - 1`.');
+w();
+w('## A.6 How to regenerate');
 w();
 w('```sh');
 w('cd <beignet repo>   # sibling of the specs repo, master branch');
@@ -908,7 +997,7 @@ w('imports beignet from source (`../beignet/src/lightning/...`) and writes this'
 w('entire file to stdout. Output is deterministic: running it twice yields');
 w('byte-identical results.');
 w();
-w('## A.6 Deviations / spec feedback');
+w('## A.7 Deviations / spec feedback');
 w();
 w('1. **`commitment_sig` size (§9.1):** the `ff_settlement` field table says');
 w('   64 bytes (compact), matching BOLT 2 wire signatures. These vectors give');
@@ -920,7 +1009,7 @@ w('2. **Voucher dust floor with anchors (§8):** the floor is exactly');
 w('   `dust_limit`, since every channel this spec permits carries');
 w('   `option_anchors` and its second-level HTLC transactions are zero-fee.');
 w('   The scripted 250,000 msat payment 2 trims at these parameters and was');
-w('   bumped to 550,000 msat (see A.2).');
+w('   Vouchers are sized so `d_2` sits exactly on that floor (see A.2).');
 w('3. **Sub-satoshi remainders (§8):** the offerer\'s balance is reduced by the');
 w('   full millisatoshi `v_k` and every output is floored, so the truncated');
 w('   remainder raises the on-chain fee rather than returning to `S`. Vectors');
