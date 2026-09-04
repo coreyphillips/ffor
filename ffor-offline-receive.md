@@ -45,7 +45,10 @@
   `R`'s node id nowhere, so `R`'s recovery set gains N agents that hold information
   and no money. The claim is stated in full in §9.6.1 with its limits: bounded
   return, every witness learns the preimage, path enforcement only against an honest
-  `S`. D1-WR is recorded as deferred (§13.8). See §17.4.
+  `S`. D1-WR is recorded as deferred (§13.8). §9.7 specifies the BOLT 12 issuer
+  for unknown payers, using BOLT 12's own rule that a path-terminal node signs the
+  invoice, with exact-slot selection, durable single issuance and refusals that
+  reveal nothing about the book (issue #25). See §17.4.
 - **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
@@ -1707,6 +1710,164 @@ can enforce rather than what any party reports:
 
 ---
 
+### 9.7 Issuance for unknown payers: the BOLT 12 issuer (normative)
+
+Everything before this section assumes a payer who already holds an invoice. `R` can
+hand fixed-amount invoices to payers it knows before going offline (§7.3); it cannot
+answer a payer it has never met, because a BOLT 12 invoice copies fields of the
+`invoice_request` it answers and so cannot be pre-signed, and a BOLT 11 invoice for an
+unknown payer is a bearer object anyone may copy (§13.7.1). Someone online must answer
+each request. This section specifies that party, the **issuer** `I`, and what BOLT 12
+already gives it for free.
+
+#### 9.7.1 What BOLT 12 provides
+
+An offer that carries `offer_paths` and omits `offer_issuer_id` is answered by whoever
+sits at the end of the path the `invoice_request` arrived on: BOLT 12 requires the
+invoice's `invoice_node_id` to be the final `blinded_node_id` of that path, requires the
+invoice to be signed under that key, and requires the payer to reject any other signer.
+`R` therefore builds its offer with onion-message paths terminating at `I`, and `I`
+signs each invoice with its blinded key for that path. The payer sees an ordinary offer
+and an ordinary invoice, and needs no FFOR support. No new signing authority exists;
+the delegation is the offer.
+
+The issuer is a delegated party by construction: it must know `R`'s node id and the
+`S`→`R` channel to build the invoice's payment paths, so unlike a pure witness (§9.6.7)
+it cannot be kept ignorant of who `R` is. It SHOULD also be the first receipt witness
+on the path, which costs it nothing and gives `R` a record from the party that saw the
+request.
+
+#### 9.7.2 Provisioning the issuer
+
+After `ACTIVE` and after provisioning it as a witness (§9.6.4), `R` sends `I`
+`ff_issuer_provision` (Appendix F.6) carrying:
+
+```
+issuer_manifest = [1: version = 1]
+                  [32: mailbox_id]                       (the witness mailbox, §9.6.4)
+                  [2: offer_len][offer_len: offer]       (the BOLT 12 offer bytes)
+                  [2: num_hops]{hop}*                    (the payment path template)
+                  [4: issue_until]                        (block height, <= D)
+                  [64: r_attestation]
+hop             = [33: node_id][8: short_channel_id][4: fee_base_msat]
+                  [4: fee_proportional_millionths][2: cltv_expiry_delta]
+                  [8: htlc_minimum_msat][8: htlc_maximum_msat]
+```
+
+The template lists every hop from the first witness to `S` and then `R`, in order, with
+the relay values each hop charges (`S`'s are the `ff_init` fee terms, §7.6). `I` builds
+a **fresh blinded payment path per invoice** from the template with a fresh path key,
+so two invoices cannot be linked through their paths. `r_attestation` is `R`'s
+node-key compact signature over
+`SHA256("ffor/issuer/attest" ‖ offer_id ‖ H_act ‖ H_book)`, where `offer_id` is BOLT
+12's merkle root of the offer; it is what lets a payer who knows `R`'s node id verify,
+out of band, that the offer and the slots are `R`'s (§9.7.5). The issuer verifies that
+the offer's `offer_paths` terminate at blinded node ids it controls, that the template
+ends at `R` via `S`, that `issue_until ≤ D`, and that `offer_absolute_expiry`, if
+present, is no later than the conservative estimate of `issue_until` (§7.5.6). It
+persists the manifest durably with the witness mailbox and answers `ff_issuer_ack`.
+
+#### 9.7.3 Answering an `invoice_request`
+
+On an `invoice_request` that arrives over one of the offer's paths and passes BOLT 12's
+own checks, `I`:
+
+1. Computes the **requested amount**: `invreq_amount` if present, else BOLT 12's
+   *expected amount* from `offer_amount` and `invreq_quantity`.
+2. Selects a slot: an unissued `k` with `d_k` **equal** to the requested amount. If
+   `offer_amount` is present the offer SHOULD be sized so that `d_k = offer_amount ×
+   quantity` exists for the quantities `R` expects to sell; with `offer_amount` absent
+   (payer-chosen amounts) the payer's `invreq_amount` must land exactly on a slot. `I`
+   MUST NOT round, MUST NOT choose a larger slot, and MUST NOT accept `invreq_amount`
+   above the expected amount unless it equals a slot (BOLT 12's "MAY reject if it
+   greatly exceeds" is a MUST here). Fixed slots are the price of §7.6's equality.
+3. Marks the slot issued **durably, with a compare-and-swap on the slot state**,
+   recording `invreq_payer_id` and a hash of `invreq_metadata`, before any invoice
+   leaves. A crash between the mark and the send leaves the slot issued and the
+   invoice unsent; the payer retries, and BOLT 12's rule for identical
+   `invreq_metadata` lets `I` re-answer with the same invoice (same slot, same hash,
+   same payer). A request with different metadata gets a different slot, never the
+   same hash twice.
+4. Builds the invoice: `invoice_payment_hash = H_k`; `invoice_amount = d_k`;
+   `invoice_paths` = one fresh blinded payment path from the template, with
+   `invoice_blindedpay` aggregated per BOLT 4 (§7.6); `invoice_relative_expiry` so that
+   the invoice expires no later than the conservative estimate of
+   `min(issue_until, D)`; `invoice_features` without MPP (§13.1); `invoice_node_id` and
+   the signature per BOLT 12 for a path-terminal issuer; optionally TLV
+   `ffor_issuer_attestation` (§9.7.5).
+5. Sends it over the request's `reply_path`.
+
+Refusals use `invoice_error` with a fixed string that reveals nothing about the book:
+`"no slot for this amount"` when no unissued `d_k` equals the requested amount, and the
+same string when the book is exhausted, when `issue_until` has passed, and after
+`ff_witness_close`. An issuer MUST NOT enumerate remaining amounts, MUST NOT say how
+many slots remain, and MUST answer an amount it has never had a slot for in the same
+way as one it has just run out of.
+
+#### 9.7.4 Path binding
+
+Every invoice `I` issues carries only payment paths built from the template, each
+traversing the required witnesses and ending at `R` through `S`. A conforming BOLT 12
+payer cannot leave a blinded path, and `S`'s TLV 13 guard (§9.6.3) fails a delegated
+HTLC that arrives from anyone but the last witness. That is the whole of the binding,
+and its limit is §9.6.1's: an `S` that already holds `t_k` can accept the hash on any
+channel, and nothing here stops it. An issuer MUST NOT add a BOLT 11 fallback, a
+plaintext route hint, or a path that omits a witness.
+
+#### 9.7.5 Proof of payment
+
+The payer's receipt is the invoice, signed under the path-terminal blinded key, plus
+the preimage. It proves payment of the request that `R`'s offer designated `I` to
+answer, at exactly `d_k` (§13.3). It does not name `R`: a payer who wants to prove to
+a third party that the payee was `R` needs `R`'s attestation. `I` MAY include
+`r_attestation` in the invoice as the odd experimental TLV `ffor_issuer_attestation`
+(type 1000055001: `[32: H_act][32: H_book][64: r_attestation]`), which a stock payer
+ignores and an FFOR-aware payer can verify against `R`'s node id and the offer. In a
+dispute between payer and `R`, `R` cannot deny an invoice whose slot its attestation
+covers and whose preimage the payer holds; `R` can deny nothing about an invoice the
+attestation does not cover, which is why `I` SHOULD include it.
+
+#### 9.7.6 Privacy
+
+The issuer learns every request (payer id, amount, quantity, metadata), every slot it
+issued, and, if it is also a witness, every settlement. It knows `R`'s node id and the
+channel. A payer learns the issuer's blinded node id for the path and nothing about
+`R` unless it asks for the attestation. `S` learns nothing new: it sees delegated HTLCs
+from the last witness as before. Two invoices for the same offer share nothing but the
+offer id, since paths and hashes are fresh per invoice. `R` running its own issuer is
+not possible while offline; that is the role's definition, and §12.5's bound applies:
+serving invoices to unknown payers is an always-online, stateful job that no script
+removes.
+
+#### 9.7.7 Retirement
+
+Issuance stops at the first of: `issue_until` reached; the book exhausted;
+`ff_witness_close` received for the mailbox; the offer's own expiry. An invoice issued
+before retirement stays payable until its own expiry, which §9.7.3 bounds by `D`, so
+no unconsumed invoice outlives its slot. `I` MUST persist the issued-slot state with the
+mailbox (§F.5) and MUST serve it to `R` on request (`ff_issuer_status`, Appendix F.6),
+so that `R` on return can tell an issued-but-unpaid slot from a never-issued one when
+it reads the `ff_close_ack` bitmap.
+
+#### 9.7.8 Conformance
+
+- A payer holding only the offer, with a stock BOLT 12 implementation and no FFOR
+  knowledge, obtains an invoice for an unconsumed slot and pays it with a stock
+  payment; `R` recovers `d_k`.
+- A second `invoice_request` for a consumed slot, with different metadata, receives a
+  different slot or the fixed refusal; with identical metadata it receives the same
+  invoice.
+- The issuer crashing between marking a slot issued and sending the invoice does not
+  issue the slot twice after restart.
+- Every issued invoice's paths traverse the required witnesses; a test payer that
+  strips the path and pays `S` directly is failed by an honest `S` under TLV 13.
+- `invoice_error` is byte-identical for "no slot at this amount", "exhausted", "after
+  issue_until" and "after close".
+- Vectors: a K = 1 book, a slot grid, an exhausted book, and a request with no matching
+  amount.
+
+---
+
 ## 10. Escape: `S`'s unilateral exit (optional, `G > 0`)
 
 Escapes are a **Variant A/B mechanism**. Variant D (§9.5) needs none: its vouchers carry
@@ -2082,12 +2243,14 @@ total via TLV in the *outer* onion"); needs sender cooperation, deferred.
 
 ### 13.2 Invoice distribution / BOLT 12
 Pre-signed BOLT 11 invoices, fixed-amount under §7.6's fixed-amount profile and
-amountless otherwise, are the v1 vehicle because BOLT 12 invoices commit to payer
-identity and thus cannot be pre-signed. The async-payments
-work (static invoices held by an always-online node,
-[BOLT PR #1149](https://github.com/lightning/bolts/pull/1149)) is solving exactly the
-distribution half of this problem; the natural convergence is `S` serving `R`'s static
-invoice material while FFOR supplies the settlement half. Track and align.
+amountless otherwise, remain the vehicle for payers `R` knows before going offline. For
+unknown payers, §9.7 specifies a BOLT 12 issuer at the end of the offer's paths, which
+BOLT 12 already lets sign invoices with no new authority. The async-payments work
+(static invoices held by an always-online node,
+[BOLT PR #1149](https://github.com/lightning/bolts/pull/1149)) solves the same
+distribution problem for the hold-and-release model; §13.7.1 says why `S` MUST NOT be
+the party serving invoices in either design, and §9.7 puts the issuer with the
+witnesses instead.
 
 ### 13.3 Amount-binding in receipts
 In the fixed-amount profile (§7.6) the payer's receipt is `R`'s signed invoice for
@@ -2279,6 +2442,10 @@ coreyphillips/ffor#24 and is not part of this version.
 | 55061 | `ff_witness_fetch_resp` | W→R | (records individually signed by `W`) |
 | 55063 | `ff_witness_close` | R→W | ✍ (`fetch_key`) |
 | 55065 | `ff_witness_close_ack` | W→R | |
+| 55067 | `ff_issuer_provision` | R→I | (manifest with `R`'s attestation, Appendix F.6) |
+| 55069 | `ff_issuer_ack` | I→R | |
+| 55071 | `ff_issuer_status` | R→I | ✍ (`fetch_key`) |
+| 55073 | `ff_issuer_status_resp` | I→R | |
 | 55031 | `ff_tower_provision` | R→T | |
 | 55033 | `ff_tower_ack` | T→R | |
 | 55035 | `ff_tower_release` | S→T | (carries the ✍ `ff_settlement`) |
@@ -2292,7 +2459,8 @@ coreyphillips/ffor#24 and is not part of this version.
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). `ff_init`
 TLV 9 and `ff_accept` TLV 9: `voucher_amounts_msat` (§7.1, §7.2, §7.6). `ff_accept`
 TLV 11: `init_hash` (§7.2, §7.5.2). `ff_init` TLV 13: `witness_peers` (§9.6.3).
-`ff_close_ack` TLV 1: `preimages` (§7.5.4). Feature bits
+`ff_close_ack` TLV 1: `preimages` (§7.5.4). BOLT 12 invoice TLV 1000055001:
+`ffor_issuer_attestation` (§9.7.5). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
 §11.3) and 55043 (tower service advertisement, §11.3). All numbers provisional
 pending bLIP assignment.
@@ -2465,8 +2633,10 @@ Builds on M8 (plain Variant D on master). Each gate is judged by what `R` can en
 5. **M9.4: Reuse by a witness, characterization.** A witness that settles a second
    same-hash HTLC itself. **Gate:** the theft succeeds and is evidence-free, as
    §13.7.1 says; the test inverts when a payer-bound settlement primitive lands.
-6. **M9.5: Issuance.** The distributor of issue #25 as a witness that serves BOLT 12
-   invoices for unconsumed slots. Specified separately; gated there.
+6. **M9.5: Issuance.** The §9.7 issuer, co-hosted with the first witness: a stock
+   BOLT 12 payer holding only the offer obtains an invoice for an unconsumed slot and
+   pays it while `R` is offline. **Gate:** §9.7.8 in full, including the crash between
+   mark and send and the byte-identical refusals.
 
 ## 16. Prior art and references
 
@@ -2590,6 +2760,9 @@ Additive. Nothing changes for an implementation that does not use the profile.
 | 2 | §7.1 | `ff_init` TLV 13 `witness_peers`; `S` fails delegated HTLCs from any other peer |
 | 3 | §14, Appendix F | Messages 55055 to 55065; the manifest, record, encryption and receipt formats |
 | 4 | §4, §13.8, §15.3 | D-R in the trust overview; D1-WR recorded as deferred; M9 milestones |
+| 5 | §9.7 | The BOLT 12 issuer for unknown payers: path-terminal signing per BOLT 12, provisioning with a payment-path template and `R`'s attestation, exact-slot selection, durable single issuance, fixed refusals, proof-of-payment semantics, privacy, retirement |
+| 6 | §14, Appendix F.6 | Messages 55067 to 55073; invoice TLV 1000055001 |
+| 7 | §13.2 | Points at §9.7 instead of a convergence with `S`-served static invoices |
 
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
@@ -2904,3 +3077,17 @@ survive a witness restart while `R` is offline, MUST rehydrate every mailbox on
 restart without any message from `R`, and MUST honour `retention_until`. The
 store-before-propagate order of §9.6.5 is what makes the profile's claim true; a
 witness that propagates first and stores later is not a receipt witness.
+
+### F.6 Issuer messages (§9.7)
+
+| Type | # | Dir | Body |
+|---|---|---|---|
+| `ff_issuer_provision` | 55067 | R→I | `[16: request_id][issuer_manifest]` (§9.7.2) |
+| `ff_issuer_ack` | 55069 | I→R | `[16: request_id][1: ok]` then ok ⇒ `[2: num_paths]{[33: blinded_node_id]}*` (the offer-path terminal keys `I` confirmed it controls), else `[2: err_len][error]` |
+| `ff_issuer_status` | 55071 | R→I | `[16: request_id][32: mailbox_id][32: nonce][64: sig]`, `sig` under `fetch_key` over `SHA256("ffor/issuer/status" ‖ mailbox_id ‖ nonce)` |
+| `ff_issuer_status_resp` | 55073 | I→R | `[16: request_id][1: ok]` then ok ⇒ `[2: K][ceil(K/8): issued]{[2: k][33: invreq_payer_id][32: metadata_hash][8: issued_unix_time]}*` for every set bit, else `[2: err_len][error]` |
+
+`ff_issuer_provision` is authorized like the witness manifest: `mailbox_id` names a
+mailbox this issuer already holds, and the request MUST arrive with a valid
+`r_attestation`; the Noise peer identity is not consulted. `ff_issuer_status` follows
+F.1's nonce rule. The issued-slot state is part of the mailbox's durable state (F.5).
