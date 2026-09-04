@@ -38,7 +38,7 @@ delegated settlements. `C_0` is the pre-epoch base state (no vouchers);
 | `n_R` | 42 (so `C_i^R` is R's commitment number 42 + i) |
 | `n0` | 42 |
 | `T_exp` (`voucher_expiry`, uniform `cltv_expiry`) | 800000 |
-| `D` (`settlement_deadline`) | 799000 |
+| `D` (`settlement_deadline`) | 798992 |
 | `fee_base_msat` (S->R hop forwarding fee, FFOR 7.6) | 1000 |
 | `fee_proportional_millionths` | 5000 |
 | profile | fixed-amount (`ff_init` TLV 9 present, FFOR 7.6) |

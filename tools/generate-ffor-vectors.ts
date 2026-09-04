@@ -191,7 +191,7 @@ const TO_SELF_DELAY = 144; // both sides
 const N_R = 42n; // R's commitment number at quiescence (C_0 = commitment 42)
 const N0 = 42n; // S's commitment number at quiescence (H_1 binding)
 const T_EXP = 800_000; // voucher_expiry (uniform cltv_expiry)
-const D_DEADLINE = 799_000; // settlement_deadline (documentation only)
+const D_DEADLINE = 798_992; // settlement_deadline = T_exp - 1008 (7.5.6 margin; enters no commitment)
 const FEE_BASE_MSAT = 1000n;
 const FEE_PROP_MILLIONTHS = 5000n;
 // Fixed-amount profile (FFOR 7.1, 7.6): K equals the number of TLV 9 amounts,

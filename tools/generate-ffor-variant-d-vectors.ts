@@ -740,8 +740,10 @@ function runScenario(sc: IScenario): IScenarioResult {
 		u32(FEE_BASE_MSAT),
 		u32(FEE_PROP_MILLIONTHS),
 		u64(G_ESCAPE),
-		u16(K),
-		...rPoints
+		// 7.1: under Variant D r_per_commitment_points MUST be empty (count 0).
+		// R's point for n_R+1 is the one S already holds from R's last
+		// revoke_and_ack; the vectors derive it from R_PC_SEED below.
+		u16(0)
 	]);
 	const tlv9 = Buffer.concat(sc.amounts.map((d) => u64(d)));
 	const initTlvs = tlvStream([{ type: 9, value: tlv9 }]);
@@ -1444,7 +1446,7 @@ code([
 	'ff_init (55001)         [2: 0xd6d9][32: channel_id][32: epoch_id][1: variant][8: budget_msat]',
 	'                        [2: max_payments K][8: min_payment_msat][4: settlement_deadline D]',
 	'                        [4: voucher_expiry T_exp][4: fee_base_msat][4: fee_proportional_millionths]',
-	'                        [8: escape_granularity_msat G][2: K][K*33: r_per_commitment_points]',
+	'                        [8: escape_granularity_msat G][2: 0] (r_per_commitment_points, empty under Variant D)',
 	'                        [TLV 9: K*8 voucher_amounts_msat][64: R node-key sig]',
 	'ff_accept (55003)       [2: 0xd6db][32: channel_id][32: epoch_id][8: s_commitment_number n0]',
 	'                        [TLV 1: K*32 payment_hashes][TLV 7: 8 s_htlc_id_base]',
@@ -1508,17 +1510,8 @@ function emitScenario(r: IScenarioResult): void {
 		if (ab && v.k === 1) w('| ... | | | | | | | |');
 	}
 	w();
-	if (!ab) {
-		w(`\`r_per_commitment_points\` (\`ff_init\`, commitment numbers ${N_R + 1n}..${N_R + BigInt(K)}; only the first is used by the single voucher round):`);
-		w();
-		w('| n | per_commitment_point_R[n] |');
-		w('|---|---|');
-		r.rPoints.forEach((p, i) => w(`| ${N_R + 1n + BigInt(i)} | \`${hex(p)}\` |`));
-		w();
-	} else {
-		w(`\`r_per_commitment_points\` carries ${K} points for commitment numbers ${N_R + 1n}..${N_R + BigInt(K)}; the first is \`${hex(r.rPoints[0])}\` and the last is \`${hex(r.rPoints[K - 1])}\`.`);
-		w();
-	}
+	w(`\`r_per_commitment_points\` is empty under Variant D (7.1: count 0). \`R\`'s per-commitment point for commitment number ${N_R + 1n}, which \`S\` holds from \`R\`'s last \`revoke_and_ack\`, is \`${hex(r.rPoints[0])}\`.`);
+	w();
 
 	// -- setup checks ------------------------------------------------------------
 	w(`### ${id}.2 Setup checks (7.1, 7.2, 7.5.3, 7.6, 8, 9.5.1 bounds)`);
@@ -1733,40 +1726,28 @@ w();
 // -- D.7 conventions and spec feedback ----------------------------------------------
 w('## D.7 Conventions adopted and spec feedback');
 w();
-w('Places where the spec text left a byte-level choice to the implementer, and');
-w('what these vectors assume. None changes the protocol; each is a sentence the');
-w('spec could add.');
+w('Byte-level conventions these vectors follow. Each was an implementer\'s choice');
+w('in the first draft of v0.9 and is now normative text in the section named, so');
+w('an implementation that matches these vectors matches the spec.');
 w();
-w('1. **7, signed messages.** `body` in the digest formula is taken to include');
-w('   the `[32: channel_id][32: epoch_id]` header (7 defines the header as the');
-w('   start of every message and lists it among the "wire bytes"). The digest is');
-w('   signed directly (single SHA256; BOLT 7 node signatures use a double SHA256),');
-w('   with a 64-byte compact low-S ECDSA signature.');
-w('2. **7, TLV stream placement.** The stream has no length prefix; a parser takes');
-w('   everything between the last fixed field and the final 64 bytes. TLV types');
-w('   and lengths are BigSize (BOLT 1). `ff_activate` and `ff_activate_ack` carry');
-w('   an empty stream.');
-w('3. **9.5.1, voucher onion.** The associated data is `payment_hash = H_k` as for');
-w('   any payment onion; the spec does not say so. "Fresh random ephemeral key" is');
-w('   seeded here for reproducibility. The payload TLVs are types 2, 4 and 8 only');
-w('   (no `short_channel_id`, no type 18).');
-w('4. **7.1, `r_per_commitment_points` in Variant D.** The field carries `K`');
-w('   points for `n_R+1 .. n_R+K`, but a Variant D setup builds exactly one');
-w('   commitment for `R` (`n_R+1`), whose point `S` already holds from `R`\'s last');
-w('   `revoke_and_ack`; the remaining `K-1` points are unused. The vectors carry');
-w('   all `K` as the table requires (D.5: 483 x 33 = 15,939 bytes of `ff_init`).');
-w('5. **7.6, fee-spike buffer.** "Plus both anchors, evaluated at twice the frozen');
-w('   feerate" is read as `fee(2 x feerate, K) + 660 sat`: the anchors are a fixed');
-w('   330 sat each and do not scale with the feerate.');
-w('6. **7.5.2, `H_commit`.** Txids are hashed in internal byte order (the order in');
-w('   which they appear inside a transaction), which is the reverse of the display');
-w('   order most tools print; both are given for every commitment.');
-w('7. **14 versus 17.3.** The registry\'s closing line still lists Appendix D as');
-w('   "taproot variant, TBD" while 17.3 assigns Appendix D to the 9.5.1 transcript');
-w('   vectors, which this file is.');
-w('8. **7.5.6 versus Appendix A.** `D = 799,000` in Appendix A is 1,000 blocks');
-w('   before `T_exp`, under the recommended 1,008-block margin; these vectors use');
-w('   `D = 798,992`. `D` does not enter any commitment, so Appendix A is unaffected.');
+w('1. **7, signed messages.** `body` in the digest formula includes the');
+w('   `[32: channel_id][32: epoch_id]` header: every byte after the 2-byte type.');
+w('   The digest is signed directly (single SHA256, not BOLT 7\'s double hash), as');
+w('   a 64-byte compact low-S ECDSA signature.');
+w('2. **7, TLV stream extent.** No length prefix: the stream runs from the end of');
+w('   the last fixed field to the final 64 bytes, BigSize type and length (BOLT 1),');
+w('   and may be empty (`ff_activate`, `ff_activate_ack`).');
+w('3. **9.5.1, voucher onion.** Associated data is `payment_hash = H_k`; the payload');
+w('   carries exactly TLVs 2, 4 and 8. The ephemeral key is seeded here for');
+w('   reproducibility; live implementations draw it fresh.');
+w('4. **7.1, `r_per_commitment_points` in Variant D.** Count 0. The one point the');
+w('   voucher round needs is the one `S` holds from `R`\'s last `revoke_and_ack`.');
+w('5. **7.6, fee-spike buffer.** `fee(2 x feerate, K) + 660 sat`: the anchors are');
+w('   a fixed 330 sat each and do not scale with the feerate.');
+w('6. **7.5.2, `H_commit`.** Txids in internal byte order, the reverse of the');
+w('   display order most tools print; both are given for every commitment.');
+w('7. **Appendix A.** `D = 798,992 = T_exp - 1008` in both appendices; `D` enters');
+w('   no commitment, so Appendix A\'s transactions are unchanged.');
 w();
 w('## D.8 How to regenerate');
 w();
