@@ -18,8 +18,8 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8.1): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
-| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded), regenerated 2026-07-25 against the corrected BOLT 3 rounding rule |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8.2): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
+| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded), regenerated 2026-09-04 with the §7.6 amount model as input (commitments unchanged) and the A.5 fee arithmetic vectors |
 | [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
 
 ## Reference implementation
@@ -74,9 +74,13 @@ change any of that.
 
 ## Status
 
-Draft v0.8.1, an errata release over v0.8. Wire details reflect what the prototype
-actually implements; message type and feature bit numbers are provisional pending bLIP
-assignment. **Variant D and §5.1 are specified but not yet prototyped** (M8, §15.2).
+Draft v0.8.2. v0.8.2 adds the amount model (§7.6): one formula for the invoice
+amount, the voucher amount and the amount `S` expects upstream, with `S`'s fee as the
+ordinary last-hop forwarding fee and every `(H_k, d_k)` pair bound into the signed
+setup transcript (issue #21). v0.8.1 was an errata release over v0.8. Wire details
+reflect what the prototype actually implements; message type and feature bit numbers
+are provisional pending bLIP assignment. **Variant D and §5.1 are specified but not
+yet prototyped** (M8, §15.2).
 
 §17 lists what changed and what it breaks. The one item that reached published
 artefacts: §8's millisatoshi rounding rule was the inverse of BOLT 3's, so `C_2` and
