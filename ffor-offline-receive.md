@@ -2,7 +2,7 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.9.2 (2026-09-05), hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.9.3 (2026-09-05), hardened by computed test vectors (Appendix A) and
   a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
   integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
@@ -1676,7 +1676,8 @@ sub-second pause of the barrier on the way back.
 
 On return, `R` sends each witness `ff_witness_fetch` (Appendix F.1), signed under
 `fetch_key` with a requester-chosen nonce the witness MUST refuse to accept twice for
-that mailbox. The witness answers with every record it holds for the mailbox. `R` MUST:
+that mailbox. The witness answers with every record it holds for the mailbox, in pages
+when they do not fit one frame (Appendix F.1). `R` MUST:
 
 1. verify each record's witness signature against the node id the record names, and
    that node id against the witness it provisioned;
@@ -2849,6 +2850,12 @@ on every message and can disagree on those four points.
 | 7 | §9.7.2 | The issuer confirms only paths it is the introduction node of; `R` builds offer paths that way |
 | 8 | §9.7.7 | A retired offer stays answerable with the fixed refusal |
 
+### 17.7 v0.9.2 → v0.9.3: fetch paging
+
+| # | Section | Change |
+|---|---|---|
+| 1 | Appendix F.1, §9.6.6 | `ff_witness_fetch` carries a signed trailing TLV stream with odd type 1 `after_k`; `ff_witness_fetch_resp` a trailing TLV stream with odd type 1 `next_after_k`; the witness pages in ascending `k`, one fetch and one nonce per page; `R` stops a witness that pages backwards or past `K`. Closes issue #33. A first page digests exactly as v0.9.2 did (empty stream), so an unpaged fetch is unchanged on the wire |
+
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
 ### B.1 Deterministic construction of `E_j`
@@ -3090,16 +3097,28 @@ onion-message transport is a future privacy upgrade.
 |---|---|---|---|
 | `ff_witness_provision` | 55055 | R→W | `[16: request_id][manifest]` (§9.6.4, includes `manifest_sig`) |
 | `ff_witness_ack` | 55057 | W→R | `[16: request_id][1: ok]` then ok ⇒ `[33: witness_node_id][4: retention_until]`, else `[2: err_len][error]` |
-| `ff_witness_fetch` | 55059 | R→W | `[16: request_id][32: mailbox_id][32: nonce][64: sig]`, `sig` under `fetch_key` over `SHA256("ffor/witness/fetch" ‖ mailbox_id ‖ nonce)` |
-| `ff_witness_fetch_resp` | 55061 | W→R | `[16: request_id][1: ok]` then ok ⇒ `[2: num_records]{[2: len][record]}*`, else `[2: err_len][error]` |
+| `ff_witness_fetch` | 55059 | R→W | `[16: request_id][32: mailbox_id][32: nonce][64: sig][tlv_stream]`, `sig` under `fetch_key` over `SHA256("ffor/witness/fetch" ‖ mailbox_id ‖ nonce ‖ tlv_stream)`; the stream is empty on a first page, and may carry odd type 1 `after_k` (`u16`) |
+| `ff_witness_fetch_resp` | 55061 | W→R | `[16: request_id][1: ok]` then ok ⇒ `[2: num_records]{[2: len][record]}*[tlv_stream]`, else `[2: err_len][error]`; the stream may carry odd type 1 `next_after_k` (`u16`) |
 | `ff_witness_close` | 55063 | R→W | `[16: request_id][32: mailbox_id][32: H_act][2: K][ceil(K/8): settled][32: nonce][64: sig]`, `sig` under `fetch_key` over `SHA256("ffor/witness/close" ‖ body without sig)` |
 | `ff_witness_close_ack` | 55065 | W→R | `[16: request_id][1: ok][2: num_records_held]` |
 
 A witness MUST reject a fetch or close whose nonce it has already accepted for that
 mailbox, and MUST answer an unknown `mailbox_id` exactly as it answers a mailbox with
-no records (so that probing for mailbox ids learns nothing). A mailbox with `K` near
-483 holds more records than one BOLT 8 frame carries; paging of
-`ff_witness_fetch_resp` is an open item (issue #33).
+no records (so that probing for mailbox ids learns nothing).
+
+**Paging.** A mailbox with `K` near 483 holds more records than one BOLT 8 frame
+carries (65535 bytes; a record is around 700 bytes without receipts), so a fetch is
+answered in pages. A witness MUST serve records in ascending `k`, MUST serve only
+records with `k > after_k` (`after_k = 0` when the TLV is absent), MUST serve at least
+one such record per page while any remain, and MUST set `next_after_k` to the `k` of
+the last record in the page when records above it remain, else omit it. `R` repeats
+the fetch with `after_k = next_after_k` and a fresh nonce until a response omits
+`next_after_k`. Each page is its own fetch under the nonce rule above, so a page cannot
+be replayed. `R` MUST stop when a response's `next_after_k` does not exceed the
+`after_k` it sent or when more than `K` pages were needed (a witness that pages
+backwards or forever), and treats what it already received as served. An empty
+mailbox, an unknown mailbox and a page past the last record all answer with no
+records and no `next_after_k`, byte for byte alike.
 
 ### F.2 The record
 
