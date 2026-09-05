@@ -2,7 +2,7 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.8.2 (2026-09-04), hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.9 (2026-09-04), hardened by computed test vectors (Appendix A) and
   a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
   integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
@@ -28,6 +28,17 @@
   operation remains for Variants A and B with an explicitly weaker attestation. See
   §7.6 and §17.2. Appendix A's inputs are restated in the new terms; every commitment,
   txid and signature is byte-identical to v0.8.1.
+- **v0.9 specifies the signed lifecycle and the legal Variant D transcript** (issues
+  #22 and #23). `ff_begin` and `ff_end` are gone. §7.5 defines a state machine,
+  `NEGOTIATING → VOUCHERS_COMMITTED → ACTIVATING → ACTIVE → DRAINING → CLOSED` with
+  `ABORTED`, each transition authorized, signed over a chained transcript hash, and
+  durable before it is acknowledged: `ff_activate` / `ff_activate_ack` (mutually signed
+  activation hash `H_act`), `ff_abort`, `ff_close` / `ff_close_ack`. `ff_accept` now
+  commits to `ff_init` (TLV 11). §9.5.1 gives Variant D's one legal BOLT 2 sequence:
+  every voucher `update_add_htlc`, both `commitment_signed` and both `revoke_and_ack`
+  complete **before** either side sends `stfu`, activation happens under quiescence as
+  an FFOR state transition and not a channel update, and the durable `ACTIVE` freeze
+  outlives the quiescence that BOLT 2 ends on disconnect. See §17.3.
 - **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
   pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
@@ -129,6 +140,8 @@ packages, the voucher output, tower mediation, escape transactions, and reconcil
 | `D` | Absolute block height after which `S` stops accepting delegated payments (`D + margin < T_exp`). |
 | `d_k` | The payee amount for hash `H_k`: what `R` is owed. In the fixed-amount profile it is the invoice amount and the voucher amount (§7.6). |
 | `fee_S(a)` | `S`'s forwarding fee for the `S`→`R` hop on a payee amount `a`, BOLT 7's formula (§7.6). Paid by the incoming HTLC on top of `a`, never deducted from the voucher. |
+| `H_act` | The activation hash: the mutually signed digest that names one epoch's terms, voucher book and commitment state (§7.5). Every later signed message and every tower or witness record binds to it. |
+| `ACTIVE` | The FFOR channel state in which delegated settlement is permitted and ordinary updates are not (§7.5). Durable on both sides; survives disconnect and restart, unlike BOLT 2 quiescence. |
 
 Notation: `C_i^R` is `R`'s commitment transaction after `i` fast-forward updates
 (commitment number `n_R + i`); `C_{n0}^S` is `S`'s commitment at epoch start.
@@ -180,9 +193,14 @@ shows why no script, covenant, or taproot construction changes it.
   formerly spelled `option_anchors_zero_fee_htlc_tx`. The superseded
   `option_anchor_outputs` type is not supported, and the spec's dust and weight
   arithmetic assumes it is absent.
-- Both nodes MUST support quiescence (`option_quiesce` / as used by splicing): epoch
-  setup and reconciliation both begin from a quiescent channel with **no pending HTLCs**
-  and no in-flight `update_fee`.
+- Both nodes MUST support quiescence (`option_quiesce` / as used by splicing).
+  Activation happens under quiescence (§7.5), which in Variants A and B is entered
+  from a channel with **no pending HTLCs** and no in-flight `update_fee`, and in
+  Variant D from a channel whose only HTLCs are the `K` committed vouchers (§9.5.1).
+  The activation acknowledgement terminates the quiescence session, inside BOLT 2's
+  60-second bound for a quiescent channel with pending HTLCs. Reconciliation in A and
+  B runs on a channel that is synchronized by construction (§11.1); Variant D's drain
+  is ordinary traffic and needs no quiescence at all.
 - Feature bit: `option_ff_receive`, bits **560/561** (provisional, experimental range),
   advertised in `init` and `node_announcement`.
 - The commitment feerate is **frozen** for the duration of the epoch at the last signed
@@ -241,20 +259,21 @@ R online                        R OFFLINE                          R returns
 ────────────────┬──────────────────────────────────────────┬────────────────────
                 │                                          │
   quiescence    │   payer_i ──HTLC(H_i)──▶ ... ──▶ S       │  reestablish (+ ff TLV)
-  ff_init      ─┼─▶                          │             │  ff_settlement replay ×j
-  ff_accept    ◀┼─                           ├─ package_i ─┼─▶ (or fetch from T)
-  ff_invoices  ─┼─▶                          │  ▼          │  ff_reconcile      ─▶
-  ff_escape_sigs┼─▶ (optional)               │  T verifies │  ff_reconcile_ack ◀─
-  ff_begin     ─┼─▶                          │  releases t_i  ff_revoke_batch   ─▶
-                │                            ▼             │  ff_end (×2)
-                │              S settles upstream instantly│  update_fulfill ×j
+  ff_init      ─┼─▶                          │             │  ff_close          ─▶
+  ff_accept    ◀┼─                           ├─ package_i ─┼─▶ ff_settlement replay ×j
+  ff_invoices  ─┼─▶  (D: voucher round)      │  ▼          │  (A/B) ff_reconcile ─▶
+  ff_escape_sigs┼─▶ (optional)               │  T verifies │  (A/B) ff_reconcile_ack ◀─
+  stfu ×2, then│                             │  releases t_i  (A/B) ff_revoke_batch ─▶
+  ff_activate  ─┼─▶  ff_activate_ack ◀─      ▼             │  ff_close_ack     ◀─
+                │              S settles upstream instantly│  update_fulfill / fail ×K
                 │              payer sees SUCCESS          │  → vouchers become balance
                 │              C_i^R gains voucher_i       │  (splice / resume normal ops)
 ```
 
-Lifecycle: **SETUP → EPOCH → (settlement × j) → RECONCILE → OPERATIONAL**, with two
-abnormal exits: `R` never returns (escape, §10) or `S` misbehaves (penalty/fraud proof,
-§12).
+Lifecycle: **NEGOTIATING → VOUCHERS_COMMITTED → ACTIVATING → ACTIVE → (settlement × j)
+→ DRAINING → CLOSED** (§7.5), with `ABORTED` reachable from every state before `ACTIVE`
+and two abnormal exits after it: `R` never returns (escape, §10, or HTLC timeout in
+Variant D) or `S` misbehaves (penalty/fraud proof, §12).
 
 The core trick, restated precisely: a channel update that only *increases* the
 counterparty's claim can be made unilaterally if the updater first revokes its own
@@ -283,8 +302,13 @@ node-key signature over
 SHA256("ffor/msg" ‖ message_type ‖ body_excluding_the_signature)
 ```
 
-where `"ffor/msg"` is the 8 ASCII bytes and `message_type` is the 2-byte big-endian
-type. The tag is normative and is part of what a verifier reconstructs: these
+where `"ffor/msg"` is the 8 ASCII bytes, `message_type` is the 2-byte big-endian
+type, and `body_excluding_the_signature` is every byte after the type: the
+`[32: channel_id][32: epoch_id]` header, the fixed fields, and the TLV stream. The
+digest is signed **directly** (one SHA256, not BOLT 7's double hash), as a 64-byte
+compact ECDSA signature with low-S. The TLV stream has no length prefix: it extends
+from the end of the last fixed field to the final 64 bytes, uses BOLT 1's BigSize type
+and length encoding, and MAY be empty. The tag is normative and is part of what a verifier reconstructs: these
 signatures are the whole of §12.2's non-repudiation layer, they are made with the same
 node key that signs BOLT 7 gossip and any other node-key surface an implementation
 exposes, and domain separation removes the cross-protocol question rather than
@@ -294,6 +318,14 @@ therefore sits *before* it (unusual for LN messages, deliberate here): unknown o
 are permitted in that stream and are covered by the digest. These signatures exist for
 **non-repudiation** (fraud proofs, §12.2), since Noise transport authenticates but does
 not produce third-party-verifiable evidence.
+
+Signed messages also chain. Each carries, in a fixed field, the transcript hash of what
+came before it (§7.5 defines the chain: `T_init`, `T_setup`, `H_act`), so a signature
+over a later message is also a commitment to every earlier one, and a §12.2 proof about
+any step needs only that step's signed message plus the public digests. "The wire
+bytes" of a message, wherever a digest is defined over them, means the complete
+message as sent: type, `channel_id`, `epoch_id`, every fixed field, the TLV stream,
+and the signature.
 
 ### 7.1 `ff_init` (type 55001, R→S) ✍
 
@@ -308,7 +340,7 @@ not produce third-party-verifiable evidence.
 | `fee_base_msat` | u32 | `S`'s forwarding fee for the `S`→`R` hop, base. This is the fee the payer sees in the invoice route hint or blinded `payment_relay` and adds on top of the payee amount (§7.6); nothing is deducted from the voucher |
 | `fee_proportional_millionths` | u32 | same fee, proportional part, in millionths of the payee amount |
 | `escape_granularity_msat` (`G`) | u64 | 0 = no escape; else escape step size (§10). MUST be 0 in Variant D, which resolves a vanished `R` through its vouchers' ordinary HTLC-timeout paths and has no escape ladder (§9.5.1) |
-| `r_per_commitment_points` | u16 + K×33 | `R`'s per-commitment points for commitment numbers `n_R+1 … n_R+K`, pre-shared so `S` can build `C_i^R` alone |
+| `r_per_commitment_points` | u16 + count×33 | Variants A and B: `count = K`, `R`'s per-commitment points for commitment numbers `n_R+1 … n_R+K`, pre-shared so `S` can build `C_i^R` alone. Variant D: `count` MUST be 0; `S` never builds a commitment for `R` alone, and the one point the voucher round needs it already holds from `R`'s last `revoke_and_ack` |
 | TLV 1: `payment_hashes` | K×32 | Variant B only: hashes generated by `R`'s tower |
 | TLV 3: `tower_node_id` | 33 | Variant B only |
 | TLV 5: `tower_uri` | var | Variant B only: how `S` reaches `T` |
@@ -344,7 +376,8 @@ with this message's TLV 9 by the same index.
 | TLV 1: `payment_hashes` | K×32 | Variants A and D: `S`-generated. In **Variant A only**, **`H_1` MUST equal `SHA256(per_commitment_secret_S[n0])`** (§12.1). In **Variant D** that binding MUST NOT be used (see below) |
 | TLV 7: `s_htlc_id_base` | u64 | the HTLC id `S` assigns to voucher `seq 1`; voucher `seq i` gets id `base + i − 1`. Required: `R` cannot otherwise observe `S`'s offer counter, and reconciliation ends with `j` live HTLCs both sides must address by id. |
 | TLV 9: `voucher_amounts_msat` | K×u64 | REQUIRED iff `ff_init` carried TLV 9, and MUST be byte-identical to it, so the amount list is under `S`'s signature as well as `R`'s (§7.6) |
-| `signature` | 64 | `S`'s node-key sig (proves `S` accepted budget/fee terms, hash set and, when present, the amount list) |
+| TLV 11: `init_hash` | 32 | REQUIRED. `T_init = SHA256("ffor/tr/init" ‖ ff_init wire bytes)` (§7.5). `S`'s signature over this message is therefore a signature over `R`'s entire `ff_init`, hashes, amounts and all |
+| `signature` | 64 | `S`'s node-key sig (proves `S` accepted budget/fee terms, hash set and, when present, the amount list, and commits to the `ff_init` it answers) |
 
 Requirements:
 - `S` MUST verify `budget_msat ≤ spendable local balance − channel_reserve − escape
@@ -354,16 +387,11 @@ Requirements:
   committed before any payment exists and in Variants A and B a slot that would be
   refused at payment time should never be offered to a payer.
 - `R` MUST reject an `ff_accept` whose TLV 9 is absent or differs from the one it
-  sent. After `ff_accept` the amount list is under both node-key signatures. The
-  *pairing* of amounts with hashes is, in this version, under one: in Variants A and
-  D the hashes travel in `ff_accept`, so `S`'s signature covers the pairs and `R`'s
-  `ff_init` covers only the amounts; in Variant B the hashes travel in `ff_init`, so
-  `R`'s signature covers the pairs and `S`'s covers only the amounts. Neither message
-  commits to the other. A mutually signed transcript hash over both, which is what
-  makes every pair provable from either party's signature alone, is specified with
-  the activation state machine (issue #22). Until then a §12.2 proof about a pair
-  needs both signed messages retained together, and no later message may change
-  either.
+  sent, or whose TLV 11 is absent or is not the digest of the `ff_init` it sent. After
+  `ff_accept`, `S`'s signature covers both messages (through TLV 11) and `R`'s covers
+  `ff_init`; `R`'s signature over the pair arrives with `ff_activate`, which signs
+  `T_setup` (§7.5). From activation on, every `(H_k, d_k)` pair is therefore under both
+  node-key signatures, and no later message may change it.
 - In Variant A, `R` cannot verify the `H_1` binding at setup (it would require the
   secret); it is verified *ex post* at settlement 1 by checking
   `preimage·G == per_commitment_point_S[n0]`. A false binding is detectable, attributable
@@ -395,11 +423,11 @@ overflows around `K = 180`, well below the `K = 483` §8 permits, and nowhere ne
 chunks as it needs, each self-describing via `first_index`, and `S` MUST treat them as
 order-independent and idempotent (a chunk re-sent after a reconnect is applied by
 index, not appended). Setup completes only when `S` holds all `total_invoices`; a
-missing chunk at `ff_begin` is an `ff_error`. Each chunk MUST fit the peer-message
-limit.
+missing chunk at `ff_activate` is grounds for `ff_abort`. Each chunk MUST fit the
+peer-message limit.
 
-Common to every variant: payment hash `H_i`, expiry ≥ wall-clock estimate of `T_exp`, a
-route hint `S → R` carrying `S`'s node id, the channel's `short_channel_id` or alias,
+Common to every variant: payment hash `H_i`, an `expiry` no later than a conservative
+wall-clock estimate of `D` (§7.5, "Deadlines"), a route hint `S → R` carrying `S`'s node id, the channel's `short_channel_id` or alias,
 `fee_base_msat` and `fee_proportional_millionths` exactly as in `ff_init`, and `S`'s
 `cltv_expiry_delta`; `min_final_cltv_expiry` as usual (it binds `S`'s upstream
 acceptance, not the voucher); signed by `R`'s node key. Invoices are single-use in every
@@ -458,37 +486,259 @@ BOLT 8 peer message holds at most `J = 1022`. `J = ceil(budget_msat / G)` over t
 `u64` fields, so nothing else constrains it: implementations MUST reject an `ff_init`
 with `G > 0` whose implied `J` exceeds 1022, at `ff_init` time rather than at
 serialization time. Sane deployments sit far below this, since `J` is also the number of
-alternative commitments both sides must build and verify before `ff_begin`.
+alternative commitments both sides must build and verify before `ff_activate`.
 
-### 7.5 `ff_begin` (type 55011, R→S)
+### 7.5 Activation, abort and close: the signed lifecycle (normative)
+
+`ff_begin` and `ff_end` are gone. An epoch has one lifecycle, the same in every variant,
+in which every transition is sent by one named party, signed over a transcript hash
+that chains to everything before it, and made durable by the receiver before it is
+acknowledged. Nothing that matters is ever implied by a disconnect, a timeout, or the
+state of BOLT 2 quiescence.
+
+#### 7.5.1 States
+
+| State | Meaning |
+|---|---|
+| `NEGOTIATING` | `ff_init` sent or received. Nothing is committed. |
+| `VOUCHERS_COMMITTED` | Every receiver claim the variant needs before activation exists on both sides. Variant D: the `K` voucher HTLCs are irrevocably committed in **both** commitment views (§9.5.1). Variants A and B: `ff_invoices` (if any) and `ff_escape_sigs` (if `G > 0`) have been exchanged and verified, and in B the tower has acknowledged its provisioning. |
+| `ACTIVATING` | `ff_activate` sent (`R`) or received (`S`). Channel is BOLT 2 quiescent. |
+| `ACTIVE` | `ff_activate_ack` persisted: by `S` before sending it, by `R` on receipt. Delegated settlement is permitted; ordinary updates are not. Durable on both sides. |
+| `DRAINING` | `ff_close_ack` persisted: by `S` before sending it, by `R` on receipt. No new delegated settlement; accepted HTLCs are being fulfilled, failed or expired. |
+| `CLOSED` | Every voucher is irrevocably resolved on both commitments (Variant D) or every reconciled voucher has been converted (A, B). Ordinary channel operation resumes. |
+| `ABORTED` | Setup ended before `ACTIVE`. Reachable from `NEGOTIATING`, `VOUCHERS_COMMITTED` and `ACTIVATING` only. |
+
+The reachable transitions are `NEGOTIATING → VOUCHERS_COMMITTED → ACTIVATING → ACTIVE →
+DRAINING → CLOSED` and `{NEGOTIATING, VOUCHERS_COMMITTED, ACTIVATING} → ABORTED`.
+There is no transition out of `ACTIVE` except to `DRAINING`, and none out of
+`DRAINING` except to `CLOSED`; a peer that wants out of an active epoch closes it, it
+cannot abort it. On-chain enforcement is available from `ACTIVE` and `DRAINING` at any
+time and is not a state of this machine: it is what a party does when the machine stalls.
+
+#### 7.5.2 Transcript hashes
+
+```
+T_init   = SHA256("ffor/tr/init"   ‖ ff_init wire bytes)
+T_setup  = SHA256("ffor/tr/setup"  ‖ T_init ‖ ff_accept wire bytes)
+H_book   = SHA256("ffor/book"      ‖ book)                          (§7.5.3)
+H_commit = SHA256("ffor/commit"    ‖ n_R^act ‖ txid(C^R at n_R^act)
+                                   ‖ n_S^act ‖ txid(C^S at n_S^act))
+H_act    = SHA256("ffor/activate"  ‖ T_setup ‖ H_book ‖ H_commit ‖ epoch_start_height)
+```
+
+Tags are the ASCII bytes shown, without a terminator. Commitment numbers are `u64`
+big-endian, `epoch_start_height` is `u32` big-endian, and txids are in internal byte
+order, that is, the byte reverse of the hex every block explorer and `bitcoin-cli`
+display. `n_R^act` and `n_S^act` are each side's **current** commitment number at the
+moment of activation, that is, after Variant D's voucher round and after any pending
+update has been acknowledged (quiescence guarantees this). In Variant D both
+commitments carry the `K` vouchers; in A and B they are the frozen pre-epoch base state
+(`n_R`, `n0`). `H_commit` is what makes activation a commitment to a specific pair of
+transactions rather than to a description of them: two implementations that disagree
+on a single output byte disagree on `H_act` and cannot activate.
+
+#### 7.5.3 The voucher book (canonical, not transmitted)
+
+Both sides compute the book from `ff_init` and `ff_accept` alone. It is the canonical
+signed entry for every slot that issue #23 asks for; it travels only as `H_book`.
+
+```
+entry_k = [2: k][32: H_k][8: d_k][4: T_exp][4: D][8: s_htlc_id_k]
+book    = [32: epoch_id][1: variant][1: profile][2: K] ‖ entry_1 ‖ … ‖ entry_K
+```
+
+`k` is 1-based and entries are in hash-set index order. `profile` is 1 for the
+fixed-amount profile (TLV 9 present) and 0 for amountless, in which case `d_k` is 0.
+`s_htlc_id_k = s_htlc_id_base + k − 1` (`ff_accept` TLV 7). `T_exp` and `D` are
+`ff_init`'s. The book therefore binds, per slot: identity, hash, amount, voucher
+expiry, admission deadline and HTLC id, under the epoch, variant and profile. It is
+covered by `H_act`, and so by both signatures.
+
+Requirements on the book, all checked at `ff_accept` and rechecked at `ff_activate`:
+`Σ d_k = budget_msat` in the fixed-amount profile; every `d_k` passes §7.6's bounds and
+§8's per-voucher checks; `K ≤ R`'s `max_accepted_htlcs`, `K ≤ 483`,
+`Σ d_k ≤ R`'s `max_htlc_value_in_flight_msat`; the funder's obligations of §7.6 hold;
+and in Variant D `G = 0`.
+
+#### 7.5.4 Messages
+
+All five are signed (✍, §7). Each begins with the standard `[32: channel_id]
+[32: epoch_id]` header, then the fields below, then the TLV stream, then the signature.
+
+**`ff_activate` (type 55045, R→S) ✍**
 
 | Field | Size | Description |
 |---|---|---|
-| `epoch_start_height` | u32 | for audit; MUST be within a few blocks of current tip |
+| `setup_hash` | 32 | `T_setup` |
+| `book_hash` | 32 | `H_book` |
+| `commit_hash` | 32 | `H_commit` |
+| `epoch_start_height` | u32 | current tip as `R` sees it; `S` MUST reject if not within 6 blocks of its own |
+| `signature` | 64 | `R`'s node-key sig |
 
-Sent from the quiescent state after all setup messages are exchanged and (Variant B)
-after `R` confirms its tower is provisioned (§9.4). On send/receipt the channel enters
-**FF_EPOCH**: all normal `update_*` / `commitment_signed` traffic is forbidden; only
-fast-forward settlement and reestablish/reconciliation messages are valid. `R` MAY now
-disconnect. `R` MAY also remain online; an epoch with zero settlements is closed
-cooperatively with `ff_end` at any time.
+`S` MUST recompute `T_setup`, `H_book` and `H_commit` from its own state and reject the
+message with `ff_abort` if any differs. On acceptance `S` computes `H_act`, persists
+`ACTIVE` together with `H_act` and the book, and only then sends:
 
-Both sides MUST persist the full epoch state (parameters, hashes, points, escape sigs,
-invoice set) durably before `ff_begin`. `R` MUST also have an on-chain sweep
-destination provisioned before going offline; every unilateral remedy in §11-§12
-needs one.
+**`ff_activate_ack` (type 55047, S→R) ✍**
 
-Setup lifetime and quiescence exit:
-- Nothing before `ff_begin` is durable except epoch_id-uniqueness tracking: a
-  disconnect during FF_SETUP aborts the setup entirely, and a pre-`ff_begin` `ff_error`
-  aborts it cleanly. Both events, like the completion of `ff_end`, **terminate the
-  quiescence session** and return the channel to normal operation (BOLT quiescence
-  otherwise ends only on reconnect or a splice; this spec adds these exits).
-- The epoch is *live* only once both sides have processed `ff_begin`. If `R` crashes
-  after persisting FF_EPOCH but before `ff_begin` reaches `S`, the sides disagree; the
-  reestablish TLV (§11.1) resolves it: an `S` that reports no epoch means setup never
-  completed, and `R` MUST discard its persisted epoch as aborted (safe: `S` never
-  accepted a delegated payment).
+| Field | Size | Description |
+|---|---|---|
+| `activation_hash` | 32 | `H_act` |
+| `signature` | 64 | `S`'s node-key sig |
+
+`R` MUST verify `activation_hash` against its own `H_act`, persist `ACTIVE` with it,
+and only then treat the epoch as live. **Receipt of `ff_activate_ack` terminates the
+BOLT 2 quiescence session** on both sides (a dependent protocol must name its
+terminating states; this is one). Together the two messages are the mutually signed
+activation transcript: `R`'s signature over the three hashes and `S`'s over their
+digest.
+
+**`ff_abort` (type 55049, either direction) ✍**
+
+| Field | Size | Description |
+|---|---|---|
+| `transcript_hash` | 32 | `T_setup` if `ff_accept` was exchanged, else `T_init` |
+| `reason` | u16 | 0 = operator, 1 = timeout, 2 = terms refused, 3 = book mismatch, 4 = commit mismatch, 5 = voucher round failed, 6 = disconnect, 7 = protocol error |
+| `data` | u16 + var | free text or evidence |
+| `signature` | 64 | sender's node-key sig |
+
+Permitted only before `ACTIVE`. Both sides persist `ABORTED` for the `epoch_id`
+(uniqueness tracking, §7) and, if the channel is quiescent, **`ff_abort` terminates the
+quiescence session**. In Variant D, an abort after the voucher round leaves `K` real
+HTLCs on the channel; §9.5.1 says how they are removed.
+
+**`ff_close` (type 55051, R→S) ✍**
+
+| Field | Size | Description |
+|---|---|---|
+| `activation_hash` | 32 | `H_act` |
+| `signature` | 64 | `R`'s node-key sig |
+
+Permitted in `ACTIVE`. It is the admission stop: on receipt `S` MUST NOT settle any
+delegated payment it has not already begun to settle, MUST complete or fail upstream
+every delegated HTLC that was irrevocably committed upstream before it processed
+`ff_close`, and in Variants A and B MUST then run the reconciliation replay and
+handshake of §11.1 (steps 1 to 4). Only then does it send:
+
+**`ff_close_ack` (type 55053, S→R) ✍**
+
+| Field | Size | Description |
+|---|---|---|
+| `activation_hash` | 32 | `H_act` |
+| `num_slots` | u16 | `K` |
+| `settled` | ceil(K/8) | bitmap, bit `k−1` set iff `S` settled slot `k` upstream (Variants A and B: iff `k ≤ j`) |
+| TLV 1: `preimages` | n × (2 + 32) | **REQUIRED in Variant D** for every set bit: `[2: k][32: t_k]`, in `k` order. Absent in A (preimages travelled in the packages) and B (`R` fetches them from `T`, §11.1 step 6) |
+| `signature` | 64 | `S`'s node-key sig |
+
+`S` persists `DRAINING` before sending it; `R` persists `DRAINING` on receipt.
+`ff_close_ack` is the last FFOR message of a cooperative epoch and `S`'s signed
+statement of which slots were paid. A bit `S` sets without the preimage (Variant D) is
+a protocol error. A bit `S` clears for a slot whose preimage `R` later holds from a
+witness or a payer is §12.2 evidence, and does not prevent `R` from fulfilling that
+slot (§7.5.6).
+
+#### 7.5.5 Transition rules
+
+For every transition: who sends it, what it signs, what MUST be durable before the
+acknowledgement leaves, what is allowed on the channel afterwards, and what happens on
+replay, disconnect and restart.
+
+| Transition | Sender | Signs | Durable before ack | Channel traffic afterwards |
+|---|---|---|---|---|
+| `NEGOTIATING → VOUCHERS_COMMITTED` | both (variant-specific, §9.5.1 / §7.3, §7.4, §9.4) | the stock BOLT 2 round (D) or the FFOR setup messages (A, B) | the stock channel state (D); the escape set and tower ack (A, B) | ordinary updates still legal until `stfu` |
+| `VOUCHERS_COMMITTED → ACTIVATING` | `R` (`stfu` then `ff_activate`) | `T_setup`, `H_book`, `H_commit` | nothing new on `R` (it may re-send) | none: quiescent |
+| `ACTIVATING → ACTIVE` | `S` (`ff_activate_ack`) | `H_act` | `S`: `ACTIVE` + `H_act` + book, before sending. `R`: same, on receipt, before exposing any invoice | delegated settlement (§9.2, §9.5.1) only. No `update_*`, `commitment_signed`, `update_fee`, `stfu`, splice or close negotiation from either side |
+| `{NEGOTIATING, VOUCHERS_COMMITTED, ACTIVATING} → ABORTED` | either (`ff_abort`), or implicit on disconnect or timeout | `T_setup` or `T_init` | `ABORTED` for the `epoch_id` | ordinary; in D the vouchers are failed per §9.5.1 |
+| `ACTIVE → DRAINING` | `R` (`ff_close`), acknowledged by `S` (`ff_close_ack`) | `H_act`, then `H_act` + bitmap (+ preimages) | `S`: `DRAINING` + bitmap before sending. `R`: `DRAINING` + ack on receipt | only `update_fulfill_htlc` / `update_fail_htlc` for the vouchers, and the `commitment_signed` / `revoke_and_ack` they need (D); the §11.1 step 6 conversions (A, B). No new `update_add_htlc`, `update_fee`, `stfu` or splice from either side |
+| `DRAINING → CLOSED` | implicit: the last voucher irrevocably resolved on both commitments | nothing | `CLOSED` | ordinary |
+
+"Durable" in the table means the complete epoch record, not a flag: parameters,
+hash set, amounts, `R`'s pre-shared points, escape signatures and invoice set where
+present, the book, the transcript hashes, and (from `ACTIVE`) `H_act`, written so that
+a restart with the peer offline can serve every later transition from disk alone. `R`
+MUST also have an on-chain sweep destination provisioned before it goes offline; every
+unilateral remedy in §11 and §12 needs one.
+
+Replay and idempotency. Every message above MUST be accepted again without effect if
+its content is byte-identical to one already processed in the same epoch, and MUST be
+rejected as a protocol error if it differs from one already processed for the same
+transition (two signed contradictory transitions are §12.2 evidence). `S` MUST
+retransmit `ff_activate_ack` whenever `R` reestablishes reporting a state before
+`ACTIVE` while `S` is `ACTIVE`, and `ff_close_ack` whenever `R` reports `ACTIVE` while
+`S` is `DRAINING` or `CLOSED`. `R` MUST retransmit `ff_activate` whenever `S`
+reestablishes reporting `VOUCHERS_COMMITTED` while `R` is `ACTIVATING` (an `R` that has
+persisted `ACTIVE` never sees this: `S` persisted first), and `ff_close` whenever `S`
+reports `ACTIVE` while `R` has sent `ff_close`.
+
+Disconnect and restart. Before `ACTIVE`, **a disconnect aborts the setup** on both
+sides (reason 6), because BOLT 2 ends quiescence on disconnect and nothing before
+`ACTIVE` is worth resuming; a Variant D voucher round survives as ordinary channel
+state and is unwound per §9.5.1. From `ACTIVE` on, the state is durable and a
+disconnect changes nothing: `channel_reestablish` carries TLV 55001 (§11.1) with the
+state and `H_act`, the two sides compare, and the retransmission rules above resolve
+every crash window. The BOLT 2 `next_commitment_number` / `next_revocation_number`
+rules apply **unchanged** in Variant D at every state, since it never advances a
+commitment number out of band; the §11.1 carve-out is for A and B only. Two `ACTIVE`
+peers reporting different `H_act` values have a protocol error: `R` enforces on-chain
+(its vouchers are real regardless) and `S` stops settling.
+
+Timeouts. `S` SHOULD abort a setup that has not reached `ACTIVE` within 60 seconds of
+`stfu` (reason 1), which is also BOLT 2's bound on a quiescent channel with pending
+HTLCs. There is no timeout in `ACTIVE`: the epoch ends by `ff_close`, by `T_exp`
+(after which `S` resolves unclaimed vouchers on-chain), or by enforcement.
+
+Towers and witnesses. Any tower (§9.4, §9.5.5) or receipt witness (issue #24) that
+`R` provisions for the epoch MUST be given `H_act` and MUST acknowledge it, and `R`
+MUST NOT expose an invoice until every such acknowledgement is in hand. A tower or
+witness MUST refuse a settlement package or receipt record that does not name the
+`H_act` it acknowledged. At `ff_close_ack` the active-settlement state of every tower or
+witness is closed explicitly by `R` (a signed `H_act` plus the bitmap is sufficient
+notice); retention for audit and recovery MAY extend beyond that, but service of new
+releases MUST NOT.
+
+#### 7.5.6 Invoice exposure, deadlines and simultaneity
+
+`R` MUST NOT expose an invoice for any slot until all of the following hold: the slot's
+voucher is irrevocably committed (`VOUCHERS_COMMITTED`); `S` has durably accepted the
+final terms (`ff_accept` received and `T_setup` fixed); `R` holds `S`'s signed
+`ff_activate_ack` and has persisted `ACTIVE`; and every provisioned tower or witness has
+acknowledged `H_act`. An invoice exposed earlier is an invoice an honest `S` will not
+settle and a witness will not record.
+
+Deadlines, all in one place:
+
+- `D < T_exp − claim_margin`, with `claim_margin ≥ reconcile_margin` (§7.1, recommended
+  `≥ 1008` blocks): `R` needs time after admission stops to return, drain, or enforce.
+- Every invoice `expiry` MUST be no later than a conservative wall-clock estimate of
+  height `D`. "Conservative" means erring early: an implementation MUST assume no more
+  than 8 minutes per remaining block and SHOULD subtract a further margin. An
+  unconsumed invoice therefore never outlives the voucher backing it.
+- `S` MUST NOT begin a delegated settlement once **any** of these holds: its tip is at
+  or past `D`; the upstream HTLC's `cltv_expiry` is within `S`'s safety delta of the
+  tip (§8); it has processed `ff_close`; it is not `ACTIVE`. `S` MUST stop early enough
+  that every upstream and receiver-claim margin survives, and MAY stop before `D` for
+  that reason.
+- A delegated HTLC that was irrevocably committed upstream before `S` observed the
+  stopping condition is settled or failed on its merits and appears in the
+  `ff_close_ack` bitmap; one committed after is failed upstream. The bitmap is final.
+- A payment arriving before `ACTIVE`, or after admission closed, is failed upstream
+  (§8's failure encoding; `invalid_onion_blinding` under a blinded path).
+
+Simultaneity is resolved by `S`'s processing order, which is serial (§9.2): whichever
+of "delegated HTLC irrevocably committed", "`ff_close` processed", "tip reached `D`"
+`S` observes first wins, and `S` MUST persist that observation before acting on it so a
+crash cannot reorder them. `R` MUST tolerate either outcome: a slot may be settled up
+to the instant `S` processed `ff_close`, and `R` learns which from the signed bitmap.
+
+Draining, Variant D (§9.5.1 gives the mechanics): after `ff_close_ack`, `R` fulfils
+every slot for which it holds a preimage (from the ack, a witness, or a payer) and
+fails every slot the ack marks unsettled for which it holds none. `R` MUST NOT fail a
+slot for which it holds a preimage, whatever the bitmap says, and MUST NOT fail a slot
+the ack marks settled. A slot `R` can neither fulfil nor fail stays pending until
+`T_exp`, when `S` resolves it on-chain. `CLOSED` is reached when no voucher remains in
+either commitment. Draining, Variants A and B: §11.1 step 6.
+
+---
 
 ### 7.6 Amounts and fees (normative)
 
@@ -607,7 +857,8 @@ fee and both anchors to the funder, whoever that is):
   `budget_msat + S's channel_reserve` spendable.
 - The **funder**, whichever side that is, MUST additionally hold above its own reserve
   the commitment fee for the base transaction plus `K` HTLC outputs (172 weight units
-  each) plus both anchors, evaluated at **twice the frozen `feerate_per_kw`**. This is
+  each), evaluated at **twice the frozen `feerate_per_kw`**, plus both anchors (a fixed
+  330 sat each, which do not scale with the feerate): `fee(2 · feerate, K) + 660 sat`. This is
   BOLT 2's fee-spike buffer, made mandatory rather than recommended: the vouchers
   stay live for the whole epoch and past `T_exp`, `update_fee` cannot run while `R` is
   offline, and a funder that reserved only the frozen fee could be unable to add the
@@ -943,38 +1194,122 @@ preimage revelation.
 `seq`, no unilateral fast-forward update, no pre-revocation, no tower call, and no
 channel message to `R`.
 
-#### 9.5.1 Construction
+#### 9.5.1 Construction: the one legal BOLT 2 sequence
 
-Setup, from quiescence:
+BOLT 2 forbids sending an update message after one's own `stfu`, and forbids sending
+`stfu` while any of one's own HTLC additions, removals or fee updates are pending. The
+voucher book is therefore built **before** quiescence, as ordinary channel traffic, and
+activated **under** quiescence as an FFOR state transition. Ordinary operation is legal
+throughout steps 1 to 5; nothing in them is FFOR-specific except what the messages
+carry.
 
-1. `S` generates preimages `t_1…t_K` and sends `R` only the hashes `H_k = SHA256(t_k)`
-   (`ff_accept` TLV 1). The amounts `d_1…d_K` are `R`'s, from `ff_init` TLV 9, echoed
-   and signed in the same `ff_accept` (§7.2, §7.6). **`R` MUST NOT learn any `t_k`.**
-   This is load-bearing; see "Why this is safe for `S`" below.
-2. `R` and `S` perform **one stock BOLT 2 commitment update** (`commitment_signed` and
-   `revoke_and_ack` in both directions) to a state carrying `K` `S`-offered HTLCs:
-   `(amount d_k, payment_hash H_k, cltv_expiry T_exp)`. Both sides end holding a normal,
-   mutually signed, non-revoked commitment. No new commitment format is involved, and
-   `S`'s pre-signed HTLC-success signatures for every voucher arrive in that one
-   `commitment_signed` (BOLT 2 `htlc_signatures`) rather than being re-sent per payment.
-3. `R` pre-signs one **fixed-amount** BOLT 11 invoice per voucher (amount exactly
-   `d_k`, `payment_hash H_k`, route hint carrying `S`'s fee terms, §7.6) and goes
-   offline.
+1. **Synchronize.** Both sides reach a state with no pending updates in either
+   direction and no in-flight `update_fee`. (This is a precondition, not quiescence:
+   `stfu` has not been sent.)
+2. **Negotiate the book.** `R` sends `ff_init` (`variant = 4`, TLV 9 with `d_1…d_K`,
+   `G = 0`, no tower TLVs). `S` generates `t_1…t_K` and answers `ff_accept` with the
+   hashes (TLV 1), the echoed amounts (TLV 9), `s_htlc_id_base` (TLV 7) and `T_init`
+   (TLV 11). Both compute `T_setup` and the book (§7.5.3), and both MUST verify every
+   book requirement now, before anything is added to the channel. **`R` MUST NOT learn
+   any `t_k`** (§9.5.2). `s_htlc_id_base` MUST equal `S`'s next offered HTLC id at this
+   moment; an `R` that sees a different id on the first add aborts.
+3. **Add the vouchers.** `S` sends `K` ordinary `update_add_htlc` messages, one per slot
+   in `k` order, each with `id = s_htlc_id_k`, `amount_msat = d_k`,
+   `payment_hash = H_k`, `cltv_expiry = T_exp`, and a valid 1366-byte onion packet
+   (below). `R` recognises a voucher by `(id, amount_msat, payment_hash, cltv_expiry)`
+   matching the book exactly and MUST treat it as a voucher: it parks the HTLC, and
+   MUST NOT fulfil it, fail it, or process its onion as a payment. Any add in this
+   window that does not match the book exactly, or a book slot that does not arrive,
+   is a failed voucher round: `R` fails the mismatching add with `update_fail_htlc`
+   (`temporary_node_failure`) and sends `ff_abort` (reason 5) once the channel is
+   synchronized again.
+4. **Commit both views.** `S` sends `commitment_signed` covering all `K` additions
+   (its `htlc_signature` list is the pre-signed HTLC-success material `R` needs for
+   every voucher, §9.5.3); `R` sends `revoke_and_ack`; `R` sends `commitment_signed`;
+   `S` sends `revoke_and_ack`. Implementations MAY split the additions across several
+   `commitment_signed` rounds; what matters is the end state. The round ends when every
+   voucher is **irrevocably committed in both commitment views**: present in `R`'s
+   current commitment and in `S`'s, and the previous commitments on both sides revoked.
+   BOLT 2's ordinary rules govern retransmission if a disconnect interrupts this step;
+   the vouchers are stock HTLCs and need nothing from FFOR to survive it.
+5. **Verify.** Each side rebuilds both current commitment transactions, checks the
+   voucher outputs (count, amounts, scripts, `cltv_expiry`, BOLT 3 ordering, no
+   trimming), verifies the peer's `htlc_signature` for every voucher's second-stage
+   transaction, and computes `H_commit` (§7.5.2) from the two txids and commitment
+   numbers. This is `VOUCHERS_COMMITTED`.
+6. **Quiesce and activate.** `R` sends `stfu` (legal: nothing of `R`'s is pending;
+   `S`'s adds are complete and acknowledged); `S` replies `stfu`. Under quiescence `R`
+   sends `ff_activate` and `S` answers `ff_activate_ack` (§7.5.4). No update message of
+   any kind is sent between either side's `stfu` and the acknowledgement. The
+   acknowledgement terminates quiescence and both sides are `ACTIVE`; `R` may now
+   expose invoices (§7.5.6) and disconnect.
+
+**Voucher onion.** `S` constructs each voucher's onion as a single-hop BOLT 4 packet to
+`R` with a fresh random ephemeral key, associated data `payment_hash = H_k` as for any
+payment onion, and a final payload carrying exactly TLVs 2, 4 and 8:
+`{amt_to_forward = d_k, outgoing_cltv_value = T_exp, payment_data = {payment_secret =
+SHA256("ffor/voucher-secret" ‖ epoch_id ‖ [2: k]), total_msat = d_k}}`, no
+`short_channel_id` and no other type. It exists so that
+a stock onion decoder sees a well-formed packet; `R` identifies vouchers from the book
+and never acts on the payload. An `R` that does decode it MUST find exactly these values
+or treat the add as mismatching.
+
+**Bounds on `K`.** `K ≤ R`'s `max_accepted_htlcs` (vouchers are `S`-offered, so `R`'s
+limit binds), `K ≤ 483`, `Σ d_k ≤ R`'s `max_htlc_value_in_flight_msat`, every `d_k ≥`
+the channel's `htlc_minimum_msat` and above the §8 dust floor, both parties' reserves
+and the funder's fee-spike obligation of §7.6 satisfied with all `K` outputs present.
+All of these are checked at step 2; a book that fails any of them is refused with
+`ff_abort` (reason 2 or 3) and never reaches step 3.
+
+**Abort after the voucher round.** If setup aborts at or after step 4 (disconnect,
+timeout, `ff_abort`, or an `ff_activate` that `S` rejects), the vouchers are real
+HTLCs that only `R` can remove. `R` MUST send `update_fail_htlc` for every voucher as
+soon as the channel is synchronized after the abort, and `S` MUST NOT settle any
+delegated payment (it is not `ACTIVE`). If `R` never reconnects, `S`'s remedy is the
+same as for an `R` that never returns: force-close after `T_exp` and take the vouchers
+through HTLC-timeout. **`S`'s liquidity commitment therefore begins at step 3, not at
+activation**, and an `S` that wants to bound the setup window SHOULD abort promptly
+(reason 1) and MAY refuse further `ff_init` from an `R` that abandons voucher rounds.
+
+**HTLC id continuity.** The vouchers occupy `S`'s offered ids `s_htlc_id_base …
+s_htlc_id_base + K − 1`. They are removed in `DRAINING` by `R`'s fulfil or fail, after
+which `S`'s next offered id continues from `s_htlc_id_base + K`. `R`'s offered counter is
+never touched. `channel_reestablish` after any disconnect uses the ordinary
+`next_commitment_number` / `next_revocation_number` values; Variant D needs no
+carve-out.
 
 `budget_msat = Σ d_k`. Note the capital difference from Variants A/B: `S`'s `to_local` is
 reduced by the **full budget for the whole epoch**, whether or not payments arrive, rather
 than converting progressively. Since the `S`↔`R` channel is unusable for routing during
 the epoch anyway (§3), the opportunity cost is close to what `S` already accepted.
 
-Settlement: on `update_add_htlc` with `payment_hash = H_k`, once the upstream HTLC is
-irrevocably committed and the §8 checks pass (the §7.6 amount checks,
-`amt_to_forward == d_k` and `amount_msat − d_k ≥ fee_S(d_k)`; height `< D`; upstream
-CLTV margin; and `H_k` not already settled), `S` fulfills upstream with `t_k`. That is the entire settlement procedure.
+**Settlement.** On `update_add_htlc` with `payment_hash = H_k`, once the upstream HTLC is
+irrevocably committed, `S` is `ACTIVE`, no stopping condition of §7.5.6 holds, and the
+§8 checks pass (the §7.6 amount checks, `amt_to_forward == d_k` within the blinded-path
+slack and `amount_msat − d_k ≥ fee_S(d_k)`; upstream CLTV margin; and `H_k` not already
+settled), `S` marks slot `k` settled durably and fulfils upstream with `t_k`. That is the
+entire settlement procedure. `S` MUST keep per-slot state `UNUSED → SETTLING → SETTLED`
+durable across restart: a slot in `SETTLING` after a crash is resolved by the upstream
+channel's own reestablish (the fulfil either went out or it did not), never by settling
+again on a second HTLC.
 
-Reconciliation: `R` reconnects, obtains the preimages of the settled vouchers, fulfills
-them with `update_fulfill_htlc`, and fails the rest with `update_fail_htlc`. One
-commitment round, entirely stock BOLT 2. §11's `ff_reconcile` / `ff_reconcile_ack` /
+**Close and drain.** `R` reconnects, sends `ff_close`, receives `ff_close_ack` with the
+bitmap and the preimages of every settled slot, and drains per §7.5.6: `update_fulfill_htlc`
+for every slot it holds a preimage for, `update_fail_htlc` for every slot the bitmap
+marks unsettled. One `commitment_signed` / `revoke_and_ack` round in each direction
+SHOULD suffice; more are legal. When no voucher remains in either commitment the epoch
+is `CLOSED` and ordinary operation resumes. §11's `ff_reconcile` / `ff_reconcile_ack` /
 `ff_revoke_batch` flow is not used.
+
+**Force-close, both views.** From `R`'s commitment, a voucher is a received HTLC: `R`
+claims it with `t_k` through the HTLC-success transaction `S` signed at step 4, then
+its CSV sweep; `S` takes an unclaimed one after `T_exp` by spending the output directly
+with the timeout path. From `S`'s commitment, a voucher is an offered HTLC: `R` claims
+it directly with `t_k` and its own key (no second-stage signature needed); `S` takes an
+unclaimed one after `T_exp` through the HTLC-timeout transaction `R` signed at step 4.
+Anchors and CPFP are as for any anchor channel; there are no trimmed vouchers, by
+construction. `R` needs only a preimage to enforce from either view, which is §9.5.3's
+point.
 
 `R` never returns: `S` force-closes after `T_exp` and sweeps every unclaimed voucher via
 its ordinary HTLC-timeout path. This is precisely what §10's escapes existed to provide,
@@ -1149,12 +1484,14 @@ own nodes, or with small budgets/short epochs.
 ### 11.1 Message flow
 
 On reconnect, `channel_reestablish` carries TLV **55001**
-`{epoch_id: 32, last_seq: u16, state: u8}` from each side (`state`: 0 = setup, 1 =
-epoch, 2 = reconciling, 3 = closed), and, from `S`, iff escape signatures were
+`{epoch_id: 32, state: u8, last_seq: u16, activation_hash: 32}` from each side
+(`state`: 0 = `NEGOTIATING`, 1 = `VOUCHERS_COMMITTED`, 2 = `ACTIVATING`, 3 = `ACTIVE`,
+4 = `DRAINING`, 5 = `CLOSED`, 6 = `ABORTED`, §7.5; `activation_hash` is `H_act`, or 32
+zero bytes before `ACTIVE`), and, from `S`, iff escape signatures were
 exchanged, TLV **55003** `s_catchup_per_commitment_point` (33 bytes): `S`'s
 per-commitment point for `n0 + 2`, which `R` otherwise could not obtain before signing
-the catch-up commitment in step 2. Mismatch rules: an `S` reporting no epoch means
-setup never completed and `R` MUST discard (§7.5); conversely, if `R` reports no epoch
+the catch-up commitment in step 2. Mismatch rules: an `S` reporting no epoch, or `ABORTED`, while `R` is before
+`ACTIVE` means setup never completed and `R` MUST discard (§7.5.5); conversely, if `R` reports no epoch
 while `S` has `last_seq > 0`, `S` MUST retain the epoch and respond `ff_error`: `S`
 holds voucher obligations and MUST NOT forget them; `S` MAY discard only at
 `last_seq == 0`. Symmetrically, once settlements exist **neither** side may discard on
@@ -1174,12 +1511,16 @@ replayed packages (replay ordering relies on transport FIFO). During an epoch an
 reconciliation, the standard `next_commitment_number` / `next_revocation_number`
 validation needs an FFOR carve-out: commitment numbers advance out-of-band (packages,
 catch-up commitment), so peers MUST tolerate the fast-forwarded numbers and reconcile
-via the FFOR TLVs, not the standard fields. Every reconciliation message is
-**idempotent**: each of the replayed packages, `ff_reconcile`, `ff_reconcile_ack`,
-`ff_revoke_batch`, and `ff_end` MUST be safely re-processable (or re-sendable) after a
-reconnect at any point, and a peer that has already closed the epoch MUST answer a
-still-reconciling peer's reestablish with `ff_end`, not an error. Then, from
-quiescence (automatic, since no other updates are legal in FF_EPOCH):
+via the FFOR TLVs, not the standard fields. This carve-out is for Variants A and B
+only; Variant D never advances a number out of band and uses the standard rules
+unchanged (§9.5.1). Every reconciliation message is **idempotent**: each of the
+replayed packages, `ff_reconcile`, `ff_reconcile_ack`, `ff_revoke_batch`, and
+`ff_close_ack` MUST be safely re-processable (or re-sendable) after a reconnect at any
+point, and a peer that is already `DRAINING` or `CLOSED` MUST answer a still-`ACTIVE`
+peer's reestablish by retransmitting `ff_close_ack`, not with an error (§7.5.5). The
+sequence, in Variants A and B, once `R` has sent `ff_close` (§7.5.4) and `S` has
+completed or failed every in-flight delegated HTLC (no other updates are legal in
+`ACTIVE`, so the channel is synchronized by construction):
 
 1. **Replay**: `S` re-sends `ff_settlement` for `seq 1…j`. `R` independently fetches
    packages/preimages from `T` (Variant B) or its mailbox and cross-checks; any
@@ -1211,38 +1552,41 @@ quiescence (automatic, since no other updates are legal in FF_EPOCH):
    `k < j`). Sequential indexes are not mutually derivable in shachain, hence the
    explicit list; `S` verifies each against `R`'s points and inserts into its shachain
    store normally.
-5. **`ff_end`** (type 55021): `S` initiates upon successfully processing
-   `ff_revoke_batch`; `R` echoes. Epoch closed; channel returns to OPERATIONAL with
-   `j` live HTLCs, feerate unfrozen.
+5. **`ff_close_ack`** (type 55053, §7.5.4): `S` sends it upon successfully processing
+   `ff_revoke_batch`, with the settled bitmap covering `seq 1…j`, having persisted
+   `DRAINING`. `R` persists `DRAINING` on receipt. The channel now has `j` live HTLCs
+   and the feerate is unfrozen for the conversion round.
 6. **Conversion**: `R` sends standard `update_fulfill_htlc` for each voucher (preimages
    from packages / `T`), through the normal commitment dance; the credits become plain
    channel balance with zero new machinery. If `S` stalls here and `T_exp` approaches,
    `R` force-closes `C_j^R` and claims every voucher on-chain via its pre-signed
    HTLC-success transactions (that is what the `htlc_sigs` in package `j` are for),
-   with anchor CPFP as usual. In Variant B the post-reconcile tower fetch is
+   with anchor CPFP as usual. The epoch is `CLOSED` when the last converted voucher
+   is irrevocably removed from both commitments. In Variant B the post-reconcile tower fetch is
    **REQUIRED** for this step, not optional: `S`'s replay cannot carry preimages
    (§9.1's preimage TLV is Variant A only), so without the fetch `R` cannot fulfill
    its vouchers; towers MUST keep serving fetches after reconciliation completes.
    **Enforcement never requires the reconcile handshake**:
    adopting `C_j^R` needs only the validated packages, so `R` MAY force-close directly
-   from FF_EPOCH, e.g. when `S` refuses reconciliation entirely (§12.1) or on an
-   `ff_error` protocol violation after `ff_begin`. Implementation note: attaching
+   from `ACTIVE`, e.g. when `S` refuses reconciliation entirely (§12.1) or on an
+   `ff_error` protocol violation after activation. Implementation note: attaching
    CPFP/fee inputs to an HTLC-success transaction changes its txid; downstream
    spent-output tracking must match by the preserved `SIGHASH_SINGLE|ANYONECANPAY`
    input 0 (outpoint + witness), never by txid.
 
 `ff_error` (type 55023, body `[u16: len][len: data]` after the standard header, BOLT 1
-error style) aborts setup (before `ff_begin`, ending the quiescence session, §7.5) or
-signals protocol violation; during EPOCH/RECONCILE the channel falls back to on-chain
-enforcement rather than aborting.
+error style) signals a protocol violation. Before `ACTIVE` it is followed by, and has
+the effect of, `ff_abort` (reason 7); during `ACTIVE` and `DRAINING` the channel falls
+back to on-chain enforcement rather than aborting (§7.5.1: there is no abort from
+`ACTIVE`).
 
 ### 11.2 Edge cases
 
 - **Reconnect mid-settlement**: `S` MUST complete or upstream-fail any in-flight
   delegated HTLC before entering step 1; reconciliation always starts from a settled
   package history.
-- **Zero-settlement epoch**: plain `ff_end` with no reconcile is permitted regardless
-  of `G`. With escapes outstanding this is still safe: normal operation reuses index
+- **Zero-settlement epoch**: `ff_close` answered by an `ff_close_ack` with an empty
+  bitmap and no reconcile is permitted regardless of `G`. With escapes outstanding this is still safe: normal operation reuses index
   `n0 + 1`, so the escapes die automatically the next time that index is revoked in
   the ordinary flow, and until then a broadcast escape only *overpays* `R` (at `j·G`
   against zero owed) at `S`'s own expense. Implementations MAY instead run the
@@ -1263,6 +1607,10 @@ enforcement rather than aborting.
   outside the delegated set): `S` MUST fail them upstream (`unknown_next_peer`) or hold
   briefly and attempt wake, if separately supported.
 - **Duplicate/unknown hash**: fail upstream; never settle a consumed hash again.
+- **Close racing a payment**: resolved by `S`'s serial processing order and the signed
+  bitmap (§7.5.6). `R` never has to guess whether the last payment landed.
+- **Abort after a Variant D voucher round**: the vouchers are ordinary HTLCs that `R`
+  fails on the next synchronized channel (§9.5.1); `S` never settles against them.
 
 ### 11.3 Liquidity interplay
 
@@ -1559,13 +1907,18 @@ Until one of those lands, this bounds how much invoice distribution may be deleg
 | 55003 | `ff_accept` | S→R | ✍ |
 | 55005 | `ff_invoices` | R→S | (invoices individually signed) |
 | 55009 | `ff_escape_sigs` | R→S | |
-| 55011 | `ff_begin` | R→S | |
+| 55011 | `ff_begin` | | removed in v0.9; MUST NOT be sent |
 | 55013 | `ff_settlement` | S→R, S→T | ✍ |
 | 55015 | `ff_reconcile` | R→S | |
 | 55017 | `ff_reconcile_ack` | S→R | |
 | 55019 | `ff_revoke_batch` | R→S | |
-| 55021 | `ff_end` | both | |
+| 55021 | `ff_end` | | removed in v0.9; MUST NOT be sent |
 | 55023 | `ff_error` | both | |
+| 55045 | `ff_activate` | R→S | ✍ (§7.5.4) |
+| 55047 | `ff_activate_ack` | S→R | ✍ |
+| 55049 | `ff_abort` | both | ✍ |
+| 55051 | `ff_close` | R→S | ✍ |
+| 55053 | `ff_close_ack` | S→R | ✍ |
 | 55031 | `ff_tower_provision` | R→T | |
 | 55033 | `ff_tower_ack` | T→R | |
 | 55035 | `ff_tower_release` | S→T | (carries the ✍ `ff_settlement`) |
@@ -1575,17 +1928,19 @@ Until one of those lands, this bounds how much invoice distribution may be deleg
 
 55007 is not a message type; it is the `node_announcement` TLV below.
 
-`channel_reestablish` TLVs: 55001 (epoch state), 55003 (`S`'s catch-up per-commitment
+`channel_reestablish` TLVs: 55001 (epoch state and `H_act`, §11.1), 55003 (`S`'s catch-up per-commitment
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). `ff_init`
-TLV 9 and `ff_accept` TLV 9: `voucher_amounts_msat` (§7.1, §7.2, §7.6). Feature bits
+TLV 9 and `ff_accept` TLV 9: `voucher_amounts_msat` (§7.1, §7.2, §7.6). `ff_accept`
+TLV 11: `init_hash` (§7.2, §7.5.2). `ff_close_ack` TLV 1: `preimages` (§7.5.4). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
 §11.3) and 55043 (tower service advertisement, §11.3). All numbers provisional
 pending bLIP assignment.
 
-**Variant D (§9.5) allocates no new message types.** It uses `ff_init` (`variant = 4`),
-`ff_accept`, `ff_invoices` and `ff_begin` for setup, then nothing at all: the voucher book
-is committed by a stock BOLT 2 `commitment_signed` / `revoke_and_ack` round, settlement
-sends no message, and reconciliation is stock `update_fulfill_htlc` /
+**Variant D (§9.5) allocates no message types of its own.** It uses `ff_init`
+(`variant = 4`), `ff_accept` and optionally `ff_invoices` for setup, the lifecycle
+messages of §7.5 that every variant shares, and nothing else: the voucher book is
+committed by stock BOLT 2 `update_add_htlc` / `commitment_signed` / `revoke_and_ack`
+traffic, settlement sends no message, and draining is stock `update_fulfill_htlc` /
 `update_fail_htlc`. `ff_settlement`, `ff_escape_sigs`, `ff_reconcile`,
 `ff_reconcile_ack`, `ff_revoke_batch` and the Appendix C tower transport are
 all **unused** in plain Variant D (§9.5.5's optional tower uses a reduced form of
@@ -1597,7 +1952,8 @@ not an extension of the protocol but a large subtraction from it.
 Appendices: (A) canonical `C_i^R` construction test vectors, see companion file
 `ffor-test-vectors.md`; (B) escape commitment and aggregate voucher script + weights,
 below; (C) tower transport (provisioning/authentication wire format), below;
-(D) taproot variant, TBD.
+(D) Variant D setup transcript and both-view commitment vectors for §7.5 and §9.5.1,
+see companion file `ffor-variant-d-vectors.md`; (E) taproot variant, TBD.
 
 ---
 
@@ -1607,7 +1963,7 @@ Everything below reuses existing beignet machinery: quiescence (splicing), hold
 invoices + wake (M2 async payments), commitment building, pre-signed HTLC-success
 handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
 
-1. **M1, epoch setup**: messages 55001-55011, FF_SETUP/FF_EPOCH channel states,
+1. **M1, epoch setup**: messages 55001-55011 (55011 since replaced by §7.5's lifecycle), FF_SETUP/FF_EPOCH channel states (since renamed, §7.5.1),
    parameter validation, persistence. Gate: epoch established, `R` disconnects, both
    sides restart and recover epoch state.
 2. **M2, Variant A settlement + reconciliation**: package build/verify, deterministic
@@ -1674,17 +2030,25 @@ transport.
    `R`'s CSV margin intact and no tower process ever running. Verifies that the §9.3
    classification rule (treat any counterparty commitment whose revocation secret we hold
    as revoked) still fires on a cold-start `R`.
-2. **M8.1: Voucher book setup.** `variant = 4` `ff_init`; `S`-generated hashes; the `K`
-   voucher HTLCs committed in one stock `commitment_signed` / `revoke_and_ack` round.
-   **Gate:** both sides hold a mutually signed, non-revoked commitment with `K` HTLC
-   outputs at `T_exp`; byte-exact against a BOLT 3 reference; `S`'s pre-signed
-   HTLC-success sigs verify for every voucher.
+2. **M8.1: Voucher book setup.** The §9.5.1 sequence exactly: `ff_init` / `ff_accept`
+   with TLVs 9 and 11, `K` `update_add_htlc` with the specified onion, both
+   `commitment_signed` and both `revoke_and_ack`, then `stfu` ×2, `ff_activate`,
+   `ff_activate_ack`. **Gate:** no update message between either `stfu` and the ack
+   (assert on the wire log); both sides hold mutually signed, non-revoked commitments
+   with `K` HTLC outputs at `T_exp` in **both** views; byte-exact against a BOLT 3
+   reference; every second-stage signature verifies; both sides compute the same
+   `T_init`, `T_setup`, `H_book`, `H_commit` and `H_act` (Appendix D vectors); `ACTIVE`
+   survives a disconnect and a restart on each side, and a disconnect before the ack
+   aborts with the vouchers failed.
 3. **M8.2: Silent settlement.** Payer pays voucher `k`'s pre-signed invoice while `R` is
    offline. **Gate:** payer sees SUCCESS; `S` sends **zero** messages to `R` and zero to
    any tower for the whole epoch (assert on the wire log, not just on balances).
-4. **M8.3: Cooperative return.** `R` reconnects, obtains preimages, fulfils settled
-   vouchers, fails the rest. **Gate:** one commitment round, entirely stock BOLT 2;
-   balances correct; no FFOR message type sent after `ff_begin`.
+4. **M8.3: Cooperative return.** `R` reconnects, sends `ff_close`, receives
+   `ff_close_ack` with bitmap and preimages, fulfils settled vouchers, fails the rest.
+   **Gate:** one commitment round, entirely stock BOLT 2 after the ack; balances
+   correct; the only FFOR messages after activation are `ff_close` and `ff_close_ack`;
+   a payment racing `ff_close` lands on exactly one side of the bitmap and `R`'s drain
+   agrees with it; `S` retransmits the ack on a reestablish from an `ACTIVE` `R`.
 5. **M8.4: Withholding `S`, payer rescue.** `S` settles upstream, then vanishes without
    revealing any preimage. `R` returns, obtains `t_k` **from the payer's receipt alone**,
    force-closes, and sweeps voucher `k` via the setup-time HTLC-success signature.
@@ -1794,6 +2158,34 @@ Editorial only: §3 gains `d_k` and `fee_S`; §9.2, §12.1, §12.4 and §13.3 no
 distinguish the fixed-amount and amountless profiles; §11.3 says what the advertised
 fee fields are.
 
+### 17.3 v0.8.2 → v0.9
+
+Behaviour changes, from the signed lifecycle (§7.5, issue #22) and the legal Variant D
+transcript (§9.5.1, issue #23). Message types 55011 and 55021 are retired.
+
+| # | Section | v0.8.2 | v0.9 |
+|---|---|---|---|
+| 1 | §7.5, §14 | `ff_begin` (unsigned) opens the epoch; `ff_end` (unsigned, echoed) closes it | `ff_activate` / `ff_activate_ack` (both signed over `H_act`) open it; `ff_close` / `ff_close_ack` (signed; the ack carries the settled bitmap and, in D, the preimages) close it; `ff_abort` (signed) ends a setup. 55011 and 55021 MUST NOT be sent |
+| 2 | §7.2, §7.5.2 | `ff_accept` did not commit to `ff_init` | TLV 11 `init_hash = T_init`; `T_setup` chains both; `H_act` chains `T_setup`, the book and both commitment txids |
+| 3 | §7.5.3 | No canonical per-slot descriptor | The voucher book: `(k, H_k, d_k, T_exp, D, s_htlc_id_k)` under `(epoch_id, variant, profile, K)`, covered by `H_act` |
+| 4 | §7.5.1, §7.5.5 | FF_SETUP / FF_EPOCH; the epoch "live once both processed `ff_begin`"; disconnect during setup aborts, otherwise unspecified | Seven named states with a transition table: authorized sender, signed content, durable-before-ack, permitted traffic, replay, disconnect, restart, timeout. `ACTIVE` and `DRAINING` are durable and outlive BOLT 2 quiescence; there is no abort from `ACTIVE` |
+| 5 | §9.5.1 | "Setup, from quiescence": vouchers added while quiescent, which BOLT 2 forbids | Vouchers added, committed and revoked into both views **before** `stfu`; activation under quiescence as an FFOR transition; the ack terminates quiescence; onion payload, `K` bounds, abort-after-round unwinding, id continuity and both force-close views specified |
+| 6 | §7.3, §7.5.6 | Invoice `expiry ≥` estimate of `T_exp` | Invoice `expiry ≤` a conservative estimate of `D` (at most 8 minutes per block); `D < T_exp − claim_margin`; `S`'s stopping conditions and the close-versus-payment race resolved by `S`'s serial order and the signed bitmap |
+| 7 | §7.5.5 | Towers acknowledged provisioning | Every tower or witness MUST acknowledge `H_act` before any invoice is exposed and MUST refuse records that do not name it |
+| 8 | §11.1 | Reestablish TLV 55001 `{epoch_id, last_seq, state}` with four states; number carve-out for every variant | `{epoch_id, state, last_seq, activation_hash}` with the seven states; the carve-out is A/B only, Variant D uses BOLT 2's reestablish rules unchanged |
+
+Editorial only: §6's diagram and lifecycle line; §11.2 gains the close-race and
+abort-after-round cases; §15.2's M8.1 and M8.3 gates restated against §9.5.1 and
+§7.5. Appendix D (`ffor-variant-d-vectors.md`) carries the transcript and both-view
+commitment vectors for §9.5.1: five scenarios (K = 1; K = 3 with S funding; K = 3
+with R funding; the 546,000 msat dust boundary; K = 483), every signed message as wire
+bytes, every hash of §7.5.2, both commitment views with all second-stage signatures,
+and all four force-close spends of voucher 1, computed with beignet's builder and
+verified both ways. Its generation fixed the signing and TLV-extent definitions in §7,
+the empty point list under Variant D in §7.1, the onion's associated data and payload
+set in §9.5.1, the anchor term of the fee-spike buffer in §7.6, and Appendix A's `D`
+(now `T_exp − 1008`).
+
 ---
 
 ## Appendix B: escape commitments and the aggregate voucher (normative)
@@ -1827,7 +2219,7 @@ per-commitment point for that index, which `R` holds from the last pre-epoch
 
 `R`'s `escape_sigs[j−1]` (§7.4) is its ordinary funding-key ECDSA `SIGHASH_ALL`
 signature on `E_j`. Both sides MUST derive the set independently and byte-identically;
-`S` MUST verify every signature before `ff_begin`, and MUST refuse the epoch otherwise.
+`S` MUST verify every signature before `ff_activate`, and MUST refuse the epoch otherwise.
 
 There are **no second-level transactions**: unlike a BOLT 3 offered HTLC, whose timeout
 path is a 2-of-2 routed through a pre-signed HTLC-timeout transaction so the CSV

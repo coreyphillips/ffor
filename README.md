@@ -18,7 +18,7 @@ role, not a node class: any implementing peer with balance and uptime can serve.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.8.2): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.9): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
 | [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded), regenerated 2026-09-04 with the §7.6 amount model as input (commitments unchanged) and the A.5 fee arithmetic vectors |
 | [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
 
@@ -74,7 +74,12 @@ change any of that.
 
 ## Status
 
-Draft v0.8.2. v0.8.2 adds the amount model (§7.6): one formula for the invoice
+Draft v0.9. v0.9 specifies the signed lifecycle (§7.5: `ff_activate` /
+`ff_activate_ack` over a chained transcript hash, `ff_abort`, `ff_close` /
+`ff_close_ack`; `ff_begin` and `ff_end` are retired) and Variant D's one legal BOLT 2
+sequence (§9.5.1: vouchers committed in both views before `stfu`, activation under
+quiescence as an FFOR transition, a durable `ACTIVE` freeze that outlives quiescence),
+resolving issues #22 and #23. v0.8.2 adds the amount model (§7.6): one formula for the invoice
 amount, the voucher amount and the amount `S` expects upstream, with `S`'s fee as the
 ordinary last-hop forwarding fee and every `(H_k, d_k)` pair bound into the signed
 setup transcript (issue #21). v0.8.1 was an errata release over v0.8. Wire details
