@@ -2,7 +2,7 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
 
-- Status: Draft v0.9.1 (2026-09-04), hardened by computed test vectors (Appendix A) and
+- Status: Draft v0.9.2 (2026-09-05), hardened by computed test vectors (Appendix A) and
   a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
   Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
   integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
@@ -1425,6 +1425,12 @@ uniform amount `G`, with `budget = M · G`. Because knowing `x_m` derives every 
 - Invoices MUST be served strictly in ascending level order and MUST NOT be reused
   (§13.7). Revealing `x_m` publishes the preimage of every invoice at a level below `m`,
   so an unserved lower-level invoice would become claimable by any node on its route.
+- **Asking for a chain.** `R` requests chained derivation with `ff_init` TLV 15
+  `hash_chain` (`[1: 1]`); `S` MUST refuse it over non-uniform amounts (reason 2) and,
+  having derived the chain, `R` verifies `SHA256(H_j) == H_{j-1}` for every `j > 1` at
+  `ff_accept` and aborts (reason 3) otherwise. An `S` that settles slot `m` MUST have
+  settled every slot below it first: revealing `x_m` reveals every lower preimage, so
+  an unpaid lower slot would become free credit for `R`.
 - **One level per payment.** Every voucher in the chain has `d_j = G` (TLV 9 carries
   `M` copies of `G`), and the invoice for level `j` is for exactly `G` with
   `payment_hash = x_{j−1}`. An invoice for several levels at once, amount `(j − p)·G`
@@ -1650,7 +1656,10 @@ payer's HTLC and eventually its own upstream channel:
 
 - `W` MUST propagate the fulfil no later than `incoming_cltv_expiry − W`'s safety
   delta, whatever the state of steps 3 and 4, and SHOULD propagate within a small
-  wall-clock bound (recommended 30 seconds) in normal operation. `W` holds `t` from
+  wall-clock bound (recommended 30 seconds) in normal operation. The safety delta
+  MUST exceed the height at which `W` would itself force-close the incoming channel
+  to claim the HTLC on-chain with the preimage it now holds (an implementation's
+  claim buffer), or the barrier would outlive the channel it protects. `W` holds `t` from
   step 1 on, so it can always claim its incoming HTLC on-chain; delaying is safe for
   `W` and unsafe only for the upstream channel's liveness.
 - If the deadline arrives with step 3 incomplete, `W` MUST still propagate, MUST keep
@@ -1786,7 +1795,11 @@ node-key compact signature over
 out of band, that the offer and the slots are `R`'s (§9.7.5). The issuer verifies that
 the offer's `offer_paths` terminate at blinded node ids it controls, that the template
 ends at `R` via `S`, that `issue_until ≤ D`, and that `offer_absolute_expiry`, if
-present, is no later than the conservative estimate of `issue_until` (§7.5.6). It
+present, is no later than the conservative estimate of `issue_until` (§7.5.6). An
+issuer can confirm a terminal blinded node id only for a path whose introduction node
+it is (it then holds the path key and derives the key the path names it by), so `R`
+SHOULD build each offer path with `I` as its introduction node; a multi-hop path to
+`I` is not confirmed and MUST NOT be counted. It
 persists the manifest durably with the witness mailbox and answers `ff_issuer_ack`.
 
 #### 9.7.3 Answering an `invoice_request`
@@ -1869,7 +1882,9 @@ before retirement stays payable until its own expiry, which §9.7.3 bounds by `D
 no unconsumed invoice outlives its slot. `I` MUST persist the issued-slot state with the
 mailbox (§F.5) and MUST serve it to `R` on request (`ff_issuer_status`, Appendix F.6),
 so that `R` on return can tell an issued-but-unpaid slot from a never-issued one when
-it reads the `ff_close_ack` bitmap.
+it reads the `ff_close_ack` bitmap. A retired offer stays answerable: a request after
+retirement receives §9.7.3's fixed refusal, never an unknown-offer error, which would
+tell the payer that issuance ended.
 
 #### 9.7.8 Conformance
 
@@ -2491,7 +2506,8 @@ coreyphillips/ffor#24 and is not part of this version.
 point, iff escapes; §11.1). `ff_accept` TLV 7: `s_htlc_id_base` (§7.2). `ff_init`
 TLV 9 and `ff_accept` TLV 9: `voucher_amounts_msat` (§7.1, §7.2, §7.6). `ff_accept`
 TLV 11: `init_hash` (§7.2, §7.5.2). `ff_init` TLV 13: `witness_peers` (§9.6.3).
-`ff_close_ack` TLV 1: `preimages` (§7.5.4). BOLT 12 invoice TLV 1000055001:
+`ff_init` TLV 15: `hash_chain` (§9.5.4; `[1: 1]`, present iff `R` asks for a chained
+book). `ff_close_ack` TLV 1: `preimages` (§7.5.4). BOLT 12 invoice TLV 1000055001:
 `ffor_issuer_attestation` (§9.7.5). Feature bits
 560/561 (`option_ff_receive`). `node_announcement` TLVs 55007 (FFOR standing terms,
 §11.3) and 55043 (tower service advertisement, §11.3). All numbers provisional
@@ -2820,6 +2836,19 @@ reestablish outcomes abort, how the bitmap is read, which abort reason is record
 and what `last_seq` means. An implementation of v0.9 before these errata interoperates
 on every message and can disagree on those four points.
 
+### 17.6 v0.9.1 → v0.9.2: errata from the M8 and M9 implementations
+
+| # | Section | Change |
+|---|---|---|
+| 1 | §9.5.4, §14 | `ff_init` TLV 15 `hash_chain` asks for a chained book; `S` refuses it over non-uniform amounts; `R` verifies the chain at `ff_accept`; `S` settles strictly in level order |
+| 2 | Appendix F.3 | The AAD is the record header with `ciphertext_hash` zeroed; HKDF is extract-then-expand with an empty salt and the tag as info (a wire change for F.3 only; no v0.9.1 record exists to break) |
+| 3 | Appendix F.2 | The record body's `epoch_id` comes from the provisioned book |
+| 4 | §9.6.5 | The witness's safety delta exceeds its own claim-and-force-close buffer |
+| 5 | Appendix F.4 | A witness without receipts refuses `min_receipts > 0` at provisioning |
+| 6 | Appendix F.1 | `ff_witness_fetch_resp` paging is an open item (issue #33) |
+| 7 | §9.7.2 | The issuer confirms only paths it is the introduction node of; `R` builds offer paths that way |
+| 8 | §9.7.7 | A retired offer stays answerable with the fixed refusal |
+
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 
 ### B.1 Deterministic construction of `E_j`
@@ -3068,7 +3097,9 @@ onion-message transport is a future privacy upgrade.
 
 A witness MUST reject a fetch or close whose nonce it has already accepted for that
 mailbox, and MUST answer an unknown `mailbox_id` exactly as it answers a mailbox with
-no records (so that probing for mailbox ids learns nothing).
+no records (so that probing for mailbox ids learns nothing). A mailbox with `K` near
+483 holds more records than one BOLT 8 frame carries; paging of
+`ff_witness_fetch_resp` is an open item (issue #33).
 
 ### F.2 The record
 
@@ -3099,7 +3130,9 @@ body = [32: epoch_id][2: k][32: t][32: H_k][8: d_k][4: T_exp][4: D]
 ```
 
 `R` verifies, after decryption, that `SHA256(t) == H_k`, that `(k, H_k, d_k, T_exp, D)`
-reproduce `terms_hash`, and that `epoch_id` is its own. The amounts and time are
+reproduce `terms_hash`, and that `epoch_id` is its own. The witness takes `epoch_id`
+from the book it was provisioned with (§7.5.3, the book's first field); it learns
+nothing else about the epoch. The amounts and time are
 context for `R`'s books and carry no protocol meaning.
 
 Size: the header is 235 bytes, the signature 64, the ciphertext 142 bytes of body plus
@@ -3111,8 +3144,11 @@ receipts.
 ECIES over secp256k1: the witness generates an ephemeral keypair `e`, computes
 `s = SHA256(ECDH(e, enc_pubkey))`, derives `key = HKDF-SHA256(s, "ffor/witness/body")`
 (32 bytes), and encrypts the body with ChaCha20-Poly1305 under `key`, nonce all
-zeros (the key is single-use), AAD = the record header. `ciphertext = [33: e_pub] ‖
-aead_output`. The ephemeral key MUST be fresh per record. The AAD binds the body to
+zeros (the key is single-use), AAD = the record header **with `ciphertext_hash` set
+to 32 zero bytes** (the header commits to the ciphertext and the ciphertext is
+bound to the header, so the hash field is the one left out of the AAD). HKDF here is
+extract-then-expand with an empty salt and the tag as `info`. `ciphertext = [33:
+e_pub] ‖ aead_output`. The ephemeral key MUST be fresh per record. The AAD binds the body to
 the header, so a witness cannot serve one body under another header without
 detection.
 
@@ -3125,6 +3161,8 @@ protocol is one provider, and its receipts are opaque bytes here. A receipt is
 **not** proof of payment, proof of solvency, or proof of Byzantine retrievability, and
 `R` MUST NOT treat the presence of receipts as anything more than the witness's claim
 that it did what `min_receipts` asked. What `R` can verify is the record it decrypts.
+A witness that cannot obtain receipts MUST refuse a manifest with `min_receipts > 0`
+at provisioning rather than record without them.
 
 ### F.5 Durability
 
