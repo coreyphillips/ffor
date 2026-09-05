@@ -12,18 +12,19 @@ commitment builder and signer, BOLT 4 onion construction and processing,
 script helpers), not written by hand. All hex is lowercase; all signatures are
 deterministic (RFC 6979, low-S), so this file regenerates byte-identically.
 
-Five scenarios share one fixture (D.0). Each scenario is a complete transcript:
+Six scenarios share one fixture (D.0). Each scenario is a complete transcript:
 
-| Scenario | K | Funder | Amounts (msat) | `s_htlc_id_base` |
-|---|---|---|---|---|
-| D.1 | 1 | `S` | 1000000 | 0 |
-| D.2 | 3 | `S` | 994000, 546250, 49749000 | 7 |
-| D.3 | 3 | `R` | 994000, 546250, 49749000 | 0 |
-| D.4 | 1 | `S` | 546000 | 0 |
-| D.5 | 483 | `S` | 483 x 546000 | 0 |
+| Scenario | K | Funder | Amounts (msat) | `s_htlc_id_base` | R pre-round balance (msat) |
+|---|---|---|---|---|---|
+| D.1 | 1 | `S` | 1000000 | 0 | 3000000000 |
+| D.2 | 3 | `S` | 994000, 546250, 49749000 | 7 | 3000000000 |
+| D.3 | 3 | `R` | 994000, 546250, 49749000 | 0 | 3000000000 |
+| D.4 | 1 | `S` | 546000 | 0 | 3000000000 |
+| D.5 | 483 | `S` | 483 x 546000 | 0 | 3000000000 |
+| D.6 | 1 | `S` | 1000000 | 0 | 0 |
 
 Conventions used throughout, where the spec leaves the byte layout to the
-implementer (each is also listed in D.7 for the spec author):
+implementer (each is also listed in D.8 for the spec author):
 
 - **Signed message body.** `body` in 7's `SHA256("ffor/msg" || type || body_excluding_the_signature)`
   is everything after the 2-byte type: `channel_id`, `epoch_id`, the fixed
@@ -57,8 +58,8 @@ implementer (each is also listed in D.7 for the spec author):
 | funding txid (internal byte order) | `bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489` |
 | `channel_id` | `bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489` |
 | funding amount | 10000000 sat |
-| pre-round balance `S` | 7000000000 msat (every scenario) |
-| pre-round balance `R` | 3000000000 msat (every scenario) |
+| pre-round balance `S` | 7000000000 msat (D.1 to D.5); 10000000000 msat (D.6) |
+| pre-round balance `R` | 3000000000 msat (D.1 to D.5); 0 msat (D.6) |
 | `dust_limit_satoshis` (both sides) | 546 |
 | `to_self_delay` (both sides) | 144 |
 | `channel_reserve_satoshis` (both sides) | 10000 |
@@ -183,6 +184,7 @@ this channel, so its next offered id is 0.
 | `s_htlc_id_base` (`ff_accept` TLV 7) | 0 |
 | `n0` (`ff_accept`) | 42 |
 | commitment fee at the frozen rate, 1 outputs (paid by `S`) | 3240 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6999000000 msat |
 
 Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
@@ -210,8 +212,8 @@ All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard a
 | S holds budget + S channel_reserve spendable | 7000000 sat >= 1000 + 10000 | pass |
 | funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve | 6999000 - 10000 >= 3240 + 660 | pass |
 | funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve | 6999000 - 10000 >= 6480 + 660 | pass |
-| both post-round balances >= channel_reserve | S 6995100 sat, R 3000000 sat, reserve 10000 | pass |
-| T_exp >= D + 1008 and D < T_exp - claim_margin | 800000 - 798992 = 1008 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 6995100 sat, R 3000000 sat (S funds: R not applied), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
 | s_htlc_id_k = s_htlc_id_base + k - 1 | ids 0 .. 0 | pass |
 
 ### D.1.3 `ff_init` and `ff_accept` (7.1, 7.2)
@@ -600,6 +602,7 @@ resolved, so voucher `k` gets id `6 + k`.
 | `s_htlc_id_base` (`ff_accept` TLV 7) | 7 |
 | `n0` (`ff_accept`) | 42 |
 | commitment fee at the frozen rate, 3 outputs (paid by `S`) | 4100 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6948710750 msat |
 
 Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
@@ -629,8 +632,8 @@ All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard a
 | S holds budget + S channel_reserve spendable | 7000000 sat >= 51289 + 10000 | pass |
 | funder (S) covers fee(K=3) + anchors at the frozen rate above its reserve | 6948710 - 10000 >= 4100 + 660 | pass |
 | funder (S) fee-spike buffer: fee(K=3) at 2 x feerate + anchors above its reserve | 6948710 - 10000 >= 8200 + 660 | pass |
-| both post-round balances >= channel_reserve | S 6943950 sat, R 3000000 sat, reserve 10000 | pass |
-| T_exp >= D + 1008 and D < T_exp - claim_margin | 800000 - 798992 = 1008 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 6943950 sat, R 3000000 sat (S funds: R not applied), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
 | s_htlc_id_k = s_htlc_id_base + k - 1 | ids 7 .. 9 | pass |
 
 ### D.2.3 `ff_init` and `ff_accept` (7.1, 7.2)
@@ -1066,6 +1069,7 @@ outputs, fee-spike buffer at twice the rate, anchors) are checked against
 | `s_htlc_id_base` (`ff_accept` TLV 7) | 0 |
 | `n0` (`ff_accept`) | 42 |
 | commitment fee at the frozen rate, 3 outputs (paid by `R`) | 4100 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6948710750 msat |
 
 Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
@@ -1095,8 +1099,8 @@ All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard a
 | S holds budget + S channel_reserve spendable | 7000000 sat >= 51289 + 10000 | pass |
 | funder (R) covers fee(K=3) + anchors at the frozen rate above its reserve | 3000000 - 10000 >= 4100 + 660 | pass |
 | funder (R) fee-spike buffer: fee(K=3) at 2 x feerate + anchors above its reserve | 3000000 - 10000 >= 8200 + 660 | pass |
-| both post-round balances >= channel_reserve | S 6948710 sat, R 2995240 sat, reserve 10000 | pass |
-| T_exp >= D + 1008 and D < T_exp - claim_margin | 800000 - 798992 = 1008 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 6948710 sat, R 2995240 sat (R funds: checked), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
 | s_htlc_id_k = s_htlc_id_base + k - 1 | ids 0 .. 2 | pass |
 
 ### D.3.3 `ff_init` and `ff_accept` (7.1, 7.2)
@@ -1531,6 +1535,7 @@ book carrying it is refused at step 2 and never built (see D.4.9).
 | `s_htlc_id_base` (`ff_accept` TLV 7) | 0 |
 | `n0` (`ff_accept`) | 42 |
 | commitment fee at the frozen rate, 1 outputs (paid by `S`) | 3240 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6999454000 msat |
 
 Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
@@ -1558,8 +1563,8 @@ All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard a
 | S holds budget + S channel_reserve spendable | 7000000 sat >= 546 + 10000 | pass |
 | funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve | 6999454 - 10000 >= 3240 + 660 | pass |
 | funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve | 6999454 - 10000 >= 6480 + 660 | pass |
-| both post-round balances >= channel_reserve | S 6995554 sat, R 3000000 sat, reserve 10000 | pass |
-| T_exp >= D + 1008 and D < T_exp - claim_margin | 800000 - 798992 = 1008 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 6995554 sat, R 3000000 sat (S funds: R not applied), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
 | s_htlc_id_k = s_htlc_id_base + k - 1 | ids 0 .. 0 | pass |
 
 ### D.4.3 `ff_init` and `ff_accept` (7.1, 7.2)
@@ -1951,6 +1956,7 @@ voucher 1 and voucher 483 land at output indices unrelated to `k`.
 | `s_htlc_id_base` (`ff_accept` TLV 7) | 0 |
 | `n0` (`ff_accept`) | 42 |
 | commitment fee at the frozen rate, 483 outputs (paid by `S`) | 210500 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6736282000 msat |
 
 Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
@@ -1980,8 +1986,8 @@ All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard a
 | S holds budget + S channel_reserve spendable | 7000000 sat >= 263718 + 10000 | pass |
 | funder (S) covers fee(K=483) + anchors at the frozen rate above its reserve | 6736282 - 10000 >= 210500 + 660 | pass |
 | funder (S) fee-spike buffer: fee(K=483) at 2 x feerate + anchors above its reserve | 6736282 - 10000 >= 421000 + 660 | pass |
-| both post-round balances >= channel_reserve | S 6525122 sat, R 3000000 sat, reserve 10000 | pass |
-| T_exp >= D + 1008 and D < T_exp - claim_margin | 800000 - 798992 = 1008 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 6525122 sat, R 3000000 sat (S funds: R not applied), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
 | s_htlc_id_k = s_htlc_id_base + k - 1 | ids 0 .. 482 | pass |
 
 ### D.5.3 `ff_init` and `ff_accept` (7.1, 7.2)
@@ -2363,7 +2369,426 @@ Fully signed (serialized with witness):
 02000000000101b772ab617557851d0f05d96026f51ff9b7baf43c6ef3ee72153495c41c8c2b09e60000000001000000012202000000000000220020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db68605004730440220662744377ce5aca7f22896bcb960a336817f6a36d5d1cd65c2dad26e7591f7d80220289b19e92128729880e44aeb0ccd5bada916475fea3b82d33342657a925cd0eb834830450221008f558bd25b844792a42bb3307633e681abdcf54aa83563fd846c69ebc0d523ca0220664cca050019db7eae3650fe81b59193ac5bb302a30255a20ea931b1807a361401008876a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a91477b67519cb4c20fe56fe1440d8c748980739fbad88ac6851b2756800350c00
 ```
 
-## D.6 Verification performed by the generator
+## D.6 K = 1, S opener and funder, R holds zero pre-epoch balance
+
+The motivating case: `S` opened and funds the channel, holds all 10,000,000
+sat, and `R` has received nothing yet (a fresh inbound-only channel). One
+voucher of 1,000,000 msat, as in D.1. Because `R`'s balance is 0 msat, BOLT 3
+omits its main output on both views (`to_local` on `R`'s view, `to_remote`
+on `S`'s view: 0 sat is below `dust_limit`); its anchor is still present
+because the commitment carries an untrimmed HTLC. Section 8 constrains only
+the funder's balance by its reserve when `S` funds, so `R`'s zero balance
+is legal and the setup-checks row for `R` reads "not applied". The voucher
+output, both signatures and every claim path are unaffected: `R`'s claim
+needs only the HTLC output and `t_1`, never a main output.
+
+### D.6.1 Parameters
+
+| Parameter | Value |
+|---|---|
+| funder / opener | `S` |
+| `epoch_id` | `75ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f93` |
+| `K` (`max_payments`) | 1 |
+| `voucher_amounts_msat` (TLV 9, `d_1..d_1`) | 1000000 |
+| `budget_msat` (= sum) | 1000000 |
+| `min_payment_msat` | 546000 |
+| `T_exp` / `D` | 800000 / 798992 |
+| `fee_base_msat` / `fee_proportional_millionths` | 1000 / 5000 |
+| `G` / `variant` / `profile` | 0 / 4 / 1 |
+| `s_htlc_id_base` (`ff_accept` TLV 7) | 0 |
+| `n0` (`ff_accept`) | 42 |
+| commitment fee at the frozen rate, 1 outputs (paid by `S`) | 3240 sat (+ 660 sat anchors) |
+| pre-round balance `S` / `R` | 10000000000 / 0 msat |
+| `S` balance after the round | 9999000000 msat |
+
+Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+
+| k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
+|---|---|---|---|---|---|---|---|
+| 1 | 1000000 | 1000 | 6000 | 1006000 | 0 | `2844e487856ac207d67b8c1c60ed43adf76cd50df7262fba665046fc4a6762db` | `64c356aaa2f7789a1ddf82024f18b37dfc22b4fb3ec7583ab7b09f8a9ad1312a` |
+
+`r_per_commitment_points` is empty under Variant D (7.1: count 0). `R`'s per-commitment point for commitment number 43, which `S` holds from `R`'s last `revoke_and_ack`, is `03dcd6df1422406c9e57514174169f8219e69e77605ee0de483f5c3bac773d6a58`.
+
+### D.6.2 Setup checks (7.1, 7.2, 7.5.3, 7.6, 8, 9.5.1 bounds)
+
+All checked at `ff_accept` and rechecked at `ff_activate`; every row is a hard assertion in the generator.
+
+| Check | Values | Result |
+|---|---|---|
+| variant == 4, G == 0, TLVs 1/3/5 absent from ff_init | variant 4, G 0 | pass |
+| sum(d_k) == budget_msat | 1000000 msat | pass |
+| K <= 483 and K <= R max_accepted_htlcs | K = 1 | pass |
+| sum(d_k) <= R max_htlc_value_in_flight_msat | 1000000 <= 5000000000 | pass |
+| every d_k >= min_payment_msat | min d_k = 1000000 >= 546000 | pass |
+| every d_k >= htlc_minimum_msat | min d_k = 1000000 >= 1 | pass |
+| no d_k trims (floor(d_k/1000) >= dust_limit, zero second-level fee under anchors) | min output 1000 sat >= 546 | pass |
+| no overflow: d_k * fee_ppm and gross_into_S(d_k) <= 2^64 - 1 | max d_k * ppm = 5000000000 | pass |
+| S holds budget + S channel_reserve spendable | 10000000 sat >= 1000 + 10000 | pass |
+| funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve | 9999000 - 10000 >= 3240 + 660 | pass |
+| funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve | 9999000 - 10000 >= 6480 + 660 | pass |
+| S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds | S 9995100 sat, R 0 sat (S funds: R not applied), reserve 10000 | pass |
+| T_exp - D >= claim_margin (1008) | 800000 - 798992 = 1008 | pass |
+| s_htlc_id_k = s_htlc_id_base + k - 1 | ids 0 .. 0 | pass |
+
+### D.6.3 `ff_init` and `ff_accept` (7.1, 7.2)
+
+**`ff_init` (type 55001, 185 bytes, signed by `R`)**
+
+| Field | Value |
+|---|---|
+| digest `SHA256("ffor/msg" || type || body)` | `c053e3b3ff31663cf662877df0842c2feec803e4ad3f12afa4f4ae509cca1977` |
+| signature (final 64 bytes) | `e0e99ff77a29e85142624109ed949a2beb6a35de044c32f884e22a67f72308526065b8e983625c675361332e2a10fa506af6b402b069471921b4a366765edf7f` |
+| SHA256(wire bytes) | `5dda21bd776f1b3d6f7cacb898efd95e31a8a04e48dae35484789bad50330da4` |
+
+Wire bytes:
+
+```
+d6d9bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a48848975ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f930400000000000f4240000100000000000854d0000c3110000c3500000003e80000138800000000000000000000090800000000000f4240e0e99ff77a29e85142624109ed949a2beb6a35de044c32f884e22a67f72308526065b8e983625c675361332e2a10fa506af6b402b069471921b4a366765edf7f
+```
+
+| Field | Value |
+|---|---|
+| `T_init` | `d290b308abba2f4346a5fb0e2477d54eada86eb455d298a14570a8c90aae4d7d` |
+
+**`ff_accept` (type 55003, 226 bytes, signed by `S`)** (TLV 1 hashes, TLV 7 `s_htlc_id_base`, TLV 9 byte-identical to `ff_init`'s, TLV 11 = `T_init`)
+
+| Field | Value |
+|---|---|
+| digest `SHA256("ffor/msg" || type || body)` | `401bec4f4270953ac17cc840efbe59b461e3a848a0546cf71d70da91779f06ae` |
+| signature (final 64 bytes) | `5ff3c9076c82f18847c629529938cb5d03cf3136d8b87be432f9ed0bc81a40e231a83a0146d5c1d0473cc11990623ca31ab3defa22e9c96142fc6340e55aac23` |
+| SHA256(wire bytes) | `e468c2f7dd682266f067ded7eb0143ae441ce50d0c7395b822d7ee3234fd1706` |
+
+Wire bytes:
+
+```
+d6dbbef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a48848975ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f93000000000000002a012064c356aaa2f7789a1ddf82024f18b37dfc22b4fb3ec7583ab7b09f8a9ad1312a07080000000000000000090800000000000f42400b20d290b308abba2f4346a5fb0e2477d54eada86eb455d298a14570a8c90aae4d7d5ff3c9076c82f18847c629529938cb5d03cf3136d8b87be432f9ed0bc81a40e231a83a0146d5c1d0473cc11990623ca31ab3defa22e9c96142fc6340e55aac23
+```
+
+| Field | Value |
+|---|---|
+| `T_setup` | `eb4e7e4a56d8612ce7dddd7ed5b8b31d22a9c394560909d5f0a8a7cfc6fb5a71` |
+
+### D.6.4 The voucher book (7.5.3)
+
+`book` is 94 bytes (`36 + 58 K`): `[32: epoch_id][1: 0x04][1: 0x01][2: K]` then one 58-byte entry per slot.
+
+```
+75ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f9304010001000164c356aaa2f7789a1ddf82024f18b37dfc22b4fb3ec7583ab7b09f8a9ad1312a00000000000f4240000c3500000c31100000000000000000
+```
+
+| Field | Value |
+|---|---|
+| `H_book` | `dc2a6687c21e580e3cacc642c8f877ded7278fc9b87e7b388ecee30142ecebb7` |
+| SHA256(book) (for cross-checking an encoder without the tag) | `d1b61ba182ae323465c118d86fd290b7faba1d329c8fd2006cc18cb1d78fe53d` |
+
+### D.6.5 `update_add_htlc` and the voucher onions (9.5.1 step 3)
+
+`S` sends one stock `update_add_htlc` per slot in `k` order. `R` recognises a
+voucher by `(id, amount_msat, payment_hash, cltv_expiry)` matching the book and
+parks it; the onion is decodable but never acted on.
+
+| k | id | amount_msat | payment_hash | cltv_expiry | payment_secret (final payload) | onion session key | onion ephemeral pubkey |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 1000000 | `64c356aaa2f7789a1ddf82024f18b37dfc22b4fb3ec7583ab7b09f8a9ad1312a` | 800000 | `f61995d0e7142641fc4bf477cb6af28804c40ceb08ffe53a474e4e40d7e46821` | `cbaeef22da81010955857ca73ba631cb61977e0e79c2d7252838feedd63ce96d` | `036d963ac16876fd39cc211026293cc7bd8238e9ed675fc032fc02403526509276` |
+
+Voucher 1's complete `update_add_htlc` (1452 bytes; the final 1366 bytes are the onion packet, whose first byte is the version 0x00 and whose next 33 are the ephemeral pubkey above). Final hop payload: `{amt_to_forward = 1000000, outgoing_cltv_value = 800000, payment_data = {payment_secret, total_msat = 1000000}}`, TLV types 2, 4, 8.
+
+```
+0080bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000000000000000000000f424064c356aaa2f7789a1ddf82024f18b37dfc22b4fb3ec7583ab7b09f8a9ad1312a000c350000036d963ac16876fd39cc211026293cc7bd8238e9ed675fc032fc02403526509276ba2fd650301e89fb51004817df6752211d1c790a460d02279ea294290a84c09bc4859593321c4b4c13cab08aa2241427b86c9df639bea29f6f20dee65ac6bfcb71bc2d3dd348bb7d62a3fffa704485e7e18334950a23e6e0271f1f720089d4307e8d1c0c660e2634303dcbe66aa2be6b9975a04a0b0b9a783d326620b3e7e97a127b9d0693f5bc1c8d44ad99c0cd27eda7a12cba3ba17cfb7c5654b8a33135fbb4fa2120417cbd90dc0e3d5751c0dc5cd55f60304024e4672ea8d8d212f41e3e1196a12e5b93e454ab4ac458db90a46fe1dc7854c92baebcc603e3d587585114027b3de8297d5b4840eec9fbd74e5eb69349d2d9d2cf33b2afdbc37aa16552d64e1d84778a150a59c39989910400a31881746e1f652670dc8e6bad4520cb6fefc4321c96245046188515a789804a39eba326bf9c42b673156abebd193d40ab35cb531c45e1358ba45d957cd2cf24020a89ac4e7b0636d4b3931832bad40b4b392a9856b2b2acef4f17d00d8fac9bbae68271576097a971af2e2e92f86a3d2a0e64aee38fc9ebecedd9ea5fbecbae7d957f0abff65a2b8ae07018d2bd7677ab9531c2eef52afe5513c134af3575fa0f2ab13e768cb8e534d4e6b5d78437b7e347fe2c247eb7efeb5983641c57d879744478a0e6069e65e2f2d6fde9d3f4af1337dec034bea238626fd082c395f7f7e9aec52365d9e7b0d2e5fbdc9d652b8b64d767702e0c8efc33ce5214a440bed404ee539a4ee702116aacc3a4c662fc04765af24de6364905a48491509a51119b6b45d9e40a2d17815c7bc4dd4784cdacf8acff303736f589f6e29cd7fb0eb3db42d2015ebc9713647cfef3bc4e16d65e743364da9dba65bb8fb6bdd1498725884e24fcfdbe886dc6631c968c472913b3dd90a1689e8bc34cc202bde4c81342c5747d36b4d75a5b25a38c7bd28b70c01040cbfc40a9de66f1041fff8ed6cfa6fc7f2ecb3142a9be99038b12b4720f09f797716322488e76abcd9688a8529f49b153c2cd2557e6c00f675fb1d8a44625de6d4198dc9481931a9616a1f91b1d69290950d6226757750956f18ce498bd4d619d3348520f4e3f09d99eb727e832eaf28d07c62106f88a64bec8400c02eb6e2352c85f3b68676799dfe09a1e903263b7f1e947d0db5d92927c9fc2fd90297c875a15eb24396cb7849ef8094e4eafb4c389c4a018b67003cf16138280be1168b31a0d6a906da867e6cce593850aa4f7b8ee46c0f1e424d8569539a6f83d1072c60cc3d2a9f06b2609e2c7287b421830a5b08bb6f17fbebed030bcfd90b1dca3018517589f935c0ddba6432c3cd994664d52a15db03717b551996a11d86e6357b3f71555d42148b0d6cc5d2a44ff8b020977de58fda9dc823307f5cb57172af1955aa35131777c2153168ee6cd0ec084fa80b1a6fde37c679b8b3d2e984124054dd4d0ed0e59d35a1c9c81968bd8df08ec0bc8ddab6a7d07f5ab3f3d731f77849618b785f8ae47e807c7a15214b8da9a37124989826abdb5d88814aa197febd8d494e96373a4b2a51112f6d72c87ff241685fafa057f0e7cf378497630ca445105955f8978b185cf223147351a8d50b34e52cf651a4f81d3706cf0b4a39703c24030c410a73121b13b57e8845c3822dc4a1649efe6564d9d57c26dd29d645972ca0200cbebbd9e35ec3aa20570ba13de783301897f02ba685148ca3332057acc7e7324a430faee1f4e2cbe1b2a4d8aeb3b5b0f031f2784c1fcbcf121533c7e868e8d66776bef99a8b88d00ea95daab41ae89a535331b46562b9b401bb674028d14e9530fa2a0229b9a8fa416ad4545d47b099e44433be1013be995d8064bc67e1e23479a87b9ea46b0d316668ff5daef2a7b71c36c89de
+```
+
+### D.6.6 Both commitment views after the round (9.5.1 steps 4 and 5)
+
+#### D.6.6.1 `R`'s view: commitment 43, 1 received HTLC (S-offered), signed by `S`
+
+| Field | Value |
+|---|---|
+| commitment number (R) | 43 |
+| `per_commitment_point_R[43]` | `03dcd6df1422406c9e57514174169f8219e69e77605ee0de483f5c3bac773d6a58` |
+| obscured commitment number | `0xb9c570f08182` |
+| commitment fee (paid by `S`) | 3240 sat + 660 sat anchors |
+| txid | `c791e5731fe89640aa2a2f297907acbafa76790e0d567016d192b5a1754b295a` |
+| txid (internal byte order, as hashed into `H_commit`) | `5a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c7` |
+| SHA256(tx bytes) | `579489ea23c5cb999596e86350a106cddd9631108118c322bb82911b83818a3b` |
+| revocation pubkey | `026b4fc56f8fe8e877de96e178e7ca33106e876168a18e785f0b6d212a46a5408d` |
+| R delayed pubkey (`to_local`) | `02f2ce48e632060212999887dbc79d7b51a6f186ad35d4030df3e827fa2fa741c3` |
+| R HTLC pubkey | `034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea` |
+| S HTLC pubkey | `02b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b4892` |
+| `to_remote` key (static, = S payment basepoint) | `032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991` |
+
+Outputs (BOLT 3 order):
+
+| # | Output | Amount (sat) | scriptPubKey |
+|---|---|---|---|
+| 0 | anchor (R) | 330 | `00202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f` |
+| 1 | anchor (S) | 330 | `0020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994` |
+| 2 | voucher_1 (received HTLC, S-offered) | 1000 | `0020aadef237b44946836dbd3f180a0f7f21039bd7d37f5b127dd5404e14b20b5980` |
+| 3 | to_remote (S) | 9995100 | `0020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a` |
+
+`to_local` (R) is omitted: its balance is 0 msat, below `dust_limit` (BOLT 3). Both anchors remain because the commitment carries an untrimmed HTLC output. The fee and anchors are charged to `S` as usual.
+
+Transaction (unsigned funding input, as signed by both parties):
+
+```
+0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980044a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994e803000000000000220020aadef237b44946836dbd3f180a0f7f21039bd7d37f5b127dd5404e14b20b59805c83980000000000220020f3394e1e619b0eca1f91be2fb5ab4dfc59ba5b84ebe014ad1d43a564d012994a8281f020
+```
+
+`S` commitment signature (`commitment_signed.signature`):
+
+- compact: `6b859b54906d5e13c2f9f396ff5ea3b2daff8d65d4ba3c48451e87a791886c7406a951548ec51cac9ad3d800c8401e0916b619977c170218c01bac9d2fd53da2`
+- DER + `SIGHASH_ALL`: `304402206b859b54906d5e13c2f9f396ff5ea3b2daff8d65d4ba3c48451e87a791886c74022006a951548ec51cac9ad3d800c8401e0916b619977c170218c01bac9d2fd53da201`
+
+`S` HTLC signatures (`commitment_signed.htlc_signature`, 1 sig in BOLT 3 output order, `SIGHASH_SINGLE|ANYONECANPAY` over each voucher's HTLC-success transaction, anchor rules: zero fee, input `nSequence = 1`):
+
+**htlc_signature for voucher 1 (output 2, 1000 sat, position 0 in the list)**
+
+| Field | Value |
+|---|---|
+| HTLC witness script (received HTLC, `cltv_expiry` 800000) | `76a914451d94046f252c4e93c380a2023bbad0c953b31d8763ac672102b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b48927c8201208763a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888527c21034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea52ae67750300350cb175ac6851b27568` |
+| HTLC-success tx (unsigned) | `02000000015a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c702000000000100000001e8030000000000002200202dc58b936232a6526119fc481e6314ae008c7041fae49223ba9aecba4916ce4700000000` |
+| HTLC-success txid | `c8ffc78fe7ee653ec2cd85f01c1721465c8028a2b178a18114b5746084d5112a` |
+| sighash (`SINGLE|ANYONECANPAY` = `0x83`) | `9d1986189d1b2452f09d36b468b62f192b5b6e6322f56842be7f531bca00174c` |
+| `S` sig (compact) | `f425af4b520b5c85230422bf0369702107f3795faf816d2a361dedcca5fdb48c3563bc4473819a08f556a4e83bfa1c73b33fa33a5dae0d4a507db21c0d5ccc4c` |
+| `S` sig (DER + `0x83`) | `3045022100f425af4b520b5c85230422bf0369702107f3795faf816d2a361dedcca5fdb48c02203563bc4473819a08f556a4e83bfa1c73b33fa33a5dae0d4a507db21c0d5ccc4c83` |
+
+#### D.6.6.2 `S`'s view: commitment 43, 1 offered HTLC, signed by `R`
+
+| Field | Value |
+|---|---|
+| commitment number (S) | 43 |
+| `per_commitment_point_S[43]` | `03b8e3a5a49272d52e232ce62d0ff46700f79509f62923a3f73244986410abc346` |
+| obscured commitment number | `0xb9c570f08182` |
+| commitment fee (paid by `S`) | 3240 sat + 660 sat anchors |
+| txid | `82ded787f31a9653b2ff24540d7ab7243f78e8efeee28eeb34cd53132a276ed7` |
+| txid (internal byte order, as hashed into `H_commit`) | `d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de82` |
+| SHA256(tx bytes) | `52c167773d05456ee2183a138767360ebb9da41661bd551899dfda64683fd3ef` |
+| revocation pubkey | `03087846de1985dbf9947be7a2ceafa799eecb09eb5da03744b4ed66eefeca7d16` |
+| S delayed pubkey (`to_local`) | `02eb5d86711bb1e6a3bb08d8787e0bb334995bb75172a1599c0dc91436448eaa50` |
+| S HTLC pubkey | `02f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c` |
+| R HTLC pubkey | `0249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c` |
+| `to_remote` key (static, = R payment basepoint) | `034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa` |
+
+Outputs (BOLT 3 order):
+
+| # | Output | Amount (sat) | scriptPubKey |
+|---|---|---|---|
+| 0 | anchor (R) | 330 | `00202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f` |
+| 1 | anchor (S) | 330 | `0020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994` |
+| 2 | voucher_1 (offered HTLC) | 1000 | `002007c392073b4876a240ea28ce35deb7b65f1ed3f5ff0b3730057041e0b1c46ad1` |
+| 3 | to_local (S) | 9995100 | `0020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db686` |
+
+`to_remote` (R) is omitted: its balance is 0 msat, below `dust_limit` (BOLT 3). Both anchors remain because the commitment carries an untrimmed HTLC output. The fee and anchors are charged to `S` as usual.
+
+Transaction (unsigned funding input, as signed by both parties):
+
+```
+0200000001bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a488489000000000070c5b980044a010000000000002200202b1b5854183c12d3316565972c4668929d314d81c5dcdbb21cb45fe8a9a8114f4a01000000000000220020e9e86e4823faa62e222ebc858a226636856158f07e69898da3b0d1af0ddb3994e80300000000000022002007c392073b4876a240ea28ce35deb7b65f1ed3f5ff0b3730057041e0b1c46ad15c83980000000000220020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db6868281f020
+```
+
+`R` commitment signature (`commitment_signed.signature`):
+
+- compact: `1881a361af8ca968e3e7c322525c50a63d7704d6b625bd6d1cfde78c10d2cb125e38a4936f94e72e6ec1075b07ab00b2f59a0ceacf02e395cb73bef7030b8389`
+- DER + `SIGHASH_ALL`: `304402201881a361af8ca968e3e7c322525c50a63d7704d6b625bd6d1cfde78c10d2cb1202205e38a4936f94e72e6ec1075b07ab00b2f59a0ceacf02e395cb73bef7030b838901`
+
+`R` HTLC signatures (`commitment_signed.htlc_signature`, 1 sig in BOLT 3 output order, `SIGHASH_SINGLE|ANYONECANPAY` over each voucher's HTLC-timeout transaction, anchor rules: zero fee, input `nSequence = 1`, `nLockTime = T_exp`):
+
+**htlc_signature for voucher 1 (output 2, 1000 sat, position 0 in the list)**
+
+| Field | Value |
+|---|---|
+| HTLC witness script (offered HTLC) | `76a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888ac6851b27568` |
+| HTLC-timeout tx (unsigned) | `0200000001d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de8202000000000100000001e803000000000000220020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db68600350c00` |
+| HTLC-timeout txid | `056e8dae2184cb21a5190de3329050790487fd54edb952a2a77d649b428df4ed` |
+| sighash (`SINGLE|ANYONECANPAY` = `0x83`) | `76b06226cef5698dfb040a2aaaae338c3799f3a7c29f3be51740615dc322b0b7` |
+| `R` sig (compact) | `ee5c7d35c1e6cbab3cc316d10e11defebf1297201a7006d5396cedd8d3ef971a7327cab1bca34d359ba20639807650928f22f767a3ede26f6ed0dde9079766ad` |
+| `R` sig (DER + `0x83`) | `3045022100ee5c7d35c1e6cbab3cc316d10e11defebf1297201a7006d5396cedd8d3ef971a02207327cab1bca34d359ba20639807650928f22f767a3ede26f6ed0dde9079766ad83` |
+
+### D.6.7 `H_commit`, `ff_activate`, `H_act`, `ff_activate_ack` (7.5.2, 7.5.4)
+
+| Field | Value |
+|---|---|
+| `n_R^act` / `txid(C^R)` internal byte order | 43 / `5a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c7` |
+| `n_S^act` / `txid(C^S)` internal byte order | 43 / `d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de82` |
+| `H_commit` | `8f19b491169952d5c5852cb9c722ec7f9e52b4bf1627f2c80377f0e7bdbe9287` |
+
+**`ff_activate` (type 55045, 230 bytes, signed by `R`)** (`setup_hash = T_setup`, `book_hash = H_book`, `commit_hash = H_commit`, `epoch_start_height = 790000`)
+
+| Field | Value |
+|---|---|
+| digest `SHA256("ffor/msg" || type || body)` | `d2f6c13933cec6cd11bf8ad5dbd0913e7d4ecf8eabce0ca0d1b37f97272848f1` |
+| signature (final 64 bytes) | `9b032fc561367edc1f08074a67a670db9d5220826d2f5ea2768ea0ae8485bf9367549039a160219ba6393387728aeb66cdf27647fe07d3d201b0c7d2df813051` |
+| SHA256(wire bytes) | `5531469deefe57bc381f19a5697d55117cfc007e284638baae4f1b0b46d1922d` |
+
+Wire bytes:
+
+```
+d705bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a48848975ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f93eb4e7e4a56d8612ce7dddd7ed5b8b31d22a9c394560909d5f0a8a7cfc6fb5a71dc2a6687c21e580e3cacc642c8f877ded7278fc9b87e7b388ecee30142ecebb78f19b491169952d5c5852cb9c722ec7f9e52b4bf1627f2c80377f0e7bdbe9287000c0df09b032fc561367edc1f08074a67a670db9d5220826d2f5ea2768ea0ae8485bf9367549039a160219ba6393387728aeb66cdf27647fe07d3d201b0c7d2df813051
+```
+
+| Field | Value |
+|---|---|
+| `H_act` | `65129deb07cd484e12e9badcbc11dace2e724e9a1ccba6b40ec92d57dbaaf028` |
+
+**`ff_activate_ack` (type 55047, 162 bytes, signed by `S`)** (`activation_hash = H_act`)
+
+| Field | Value |
+|---|---|
+| digest `SHA256("ffor/msg" || type || body)` | `d41788dbcd7a0ed70a03e60b78902f863bfb7ffee41222f4cb943f83d217d146` |
+| signature (final 64 bytes) | `1b127837288c4ae30686b772f13791954b42dafb2b318eba7f91545e3a09089543a8e85aedf462ecd5a1338602329a036c49c41473420ac1f2d2b911898baacc` |
+| SHA256(wire bytes) | `1415f328f391aa3b78ba44fd6b41e6940425d6af44e537baeb61a33de60b67ee` |
+
+Wire bytes:
+
+```
+d707bef67e4e2fb9ddeeb3461973cd4c62abb35050b1add772995b820b584a48848975ac6c4567bb853d69517b2fe7660700e83262c129fb80c5f3e7b8705d2b2f9365129deb07cd484e12e9badcbc11dace2e724e9a1ccba6b40ec92d57dbaaf0281b127837288c4ae30686b772f13791954b42dafb2b318eba7f91545e3a09089543a8e85aedf462ecd5a1338602329a036c49c41473420ac1f2d2b911898baacc
+```
+
+### D.6.8 Force-close claim paths for voucher 1 (9.5.1)
+
+#### D.6.8.1 R's view: HTLC-success transaction for voucher 1 (R claims with t_1)
+
+Spends output 2 of R's commitment (1000 sat, received-HTLC script). Zero fee,
+`nSequence = 1`, `nLockTime = 0`, single output of the full amount to the CSV-delayed script
+(revocation key or R's delayed key after `to_self_delay = 144`). S's signature is the
+`htlc_signature` from the setup `commitment_signed` (9.5.3): R needs nothing from S at claim time.
+
+| Field | Value |
+|---|---|
+| txid | `c8ffc78fe7ee653ec2cd85f01c1721465c8028a2b178a18114b5746084d5112a` |
+| sighash type | R: `SIGHASH_ALL` (0x01); S: `SIGHASH_SINGLE|ANYONECANPAY` (0x83), sighash in the R-view table above |
+| sighash signed here | `b50e8cbd7a4fee51002ce26759c25abb95c349eb83fb41556dba00bbbf789eef` |
+| witness layout | `0 <S htlc sig, DER+0x83> <R htlc sig, DER+0x01> <t_1> <received-HTLC witness script>` |
+| R HTLC privkey on this commitment | `29b220f1273050a7c38323ce52e79dc9b44953e6fd8d6f44d39db98bee09644d` |
+| R signature (compact) | `47f3ddaba430eae43409581de5f4abc76310cbc1ca75c8a320977be55b0fa81f13eba6036001259826d0dd9bc6df4657f4bd50a714ab8fbd19bb600d4d06bce6` |
+| R signature (DER + 0x01) | `3044022047f3ddaba430eae43409581de5f4abc76310cbc1ca75c8a320977be55b0fa81f022013eba6036001259826d0dd9bc6df4657f4bd50a714ab8fbd19bb600d4d06bce601` |
+| S signature (DER + 0x83) | `3045022100f425af4b520b5c85230422bf0369702107f3795faf816d2a361dedcca5fdb48c02203563bc4473819a08f556a4e83bfa1c73b33fa33a5dae0d4a507db21c0d5ccc4c83` |
+
+Unsigned:
+
+```
+02000000015a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c702000000000100000001e8030000000000002200202dc58b936232a6526119fc481e6314ae008c7041fae49223ba9aecba4916ce4700000000
+```
+
+Witness stack (space-separated; `<>` is the empty element):
+
+```
+<> 3045022100f425af4b520b5c85230422bf0369702107f3795faf816d2a361dedcca5fdb48c02203563bc4473819a08f556a4e83bfa1c73b33fa33a5dae0d4a507db21c0d5ccc4c83 3044022047f3ddaba430eae43409581de5f4abc76310cbc1ca75c8a320977be55b0fa81f022013eba6036001259826d0dd9bc6df4657f4bd50a714ab8fbd19bb600d4d06bce601 2844e487856ac207d67b8c1c60ed43adf76cd50df7262fba665046fc4a6762db 76a914451d94046f252c4e93c380a2023bbad0c953b31d8763ac672102b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b48927c8201208763a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888527c21034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea52ae67750300350cb175ac6851b27568
+```
+
+Fully signed (serialized with witness):
+
+```
+020000000001015a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c702000000000100000001e8030000000000002200202dc58b936232a6526119fc481e6314ae008c7041fae49223ba9aecba4916ce470500483045022100f425af4b520b5c85230422bf0369702107f3795faf816d2a361dedcca5fdb48c02203563bc4473819a08f556a4e83bfa1c73b33fa33a5dae0d4a507db21c0d5ccc4c83473044022047f3ddaba430eae43409581de5f4abc76310cbc1ca75c8a320977be55b0fa81f022013eba6036001259826d0dd9bc6df4657f4bd50a714ab8fbd19bb600d4d06bce601202844e487856ac207d67b8c1c60ed43adf76cd50df7262fba665046fc4a6762db8e76a914451d94046f252c4e93c380a2023bbad0c953b31d8763ac672102b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b48927c8201208763a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888527c21034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea52ae67750300350cb175ac6851b2756800000000
+```
+
+#### D.6.8.2 R's view: S's direct timeout spend of voucher 1 after T_exp
+
+Spends the same output 2 through the received-HTLC script's timeout branch:
+`nLockTime = T_exp`, `nSequence = 1` (the anchor CSV; also what makes CLTV enforceable),
+200 sat nominal fee, remainder to S's sweep P2WPKH. No second-level transaction and no
+signature from R: this is how S recovers an unclaimed voucher if R never returns (9.5.1).
+beignet builder: `buildRemoteHtlcTimeoutClaimTx` + `buildRemoteHtlcTimeoutWitness`.
+
+| Field | Value |
+|---|---|
+| txid | `85dd5153a28d6ec637713485b832e952b4782af8a71d7c6ab56223285e5030d2` |
+| sighash type | `SIGHASH_ALL` (0x01) |
+| sighash signed here | `fe47bcfa2614ca4b108b36ca7669fdf80846b6b0065210a8fd2b8eea4b03b084` |
+| witness layout | `<S htlc sig, DER+0x01> <> <received-HTLC witness script>` (the empty element fails `OP_SIZE 32 OP_EQUAL`, selecting the timeout branch) |
+| S HTLC privkey on this commitment | `3bff71454cc58337552426935ac5a512513695b46bdce52b6874db50d67e30fc` |
+| S signature (compact) | `97e8b384e9f20b948bf59db35557fb8897996839d89a3632a5ca5ebf42461780267ddf20cb3cef235d9a251fa11443228d9e3901cca939214fcffd934c664a07` |
+| destination (S sweep P2WPKH) | `001414dc9d213971a3b25a3d6ee821b7bb9c5881f93b` |
+
+Unsigned:
+
+```
+02000000015a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c702000000000100000001200300000000000016001414dc9d213971a3b25a3d6ee821b7bb9c5881f93b00350c00
+```
+
+Witness stack (space-separated; `<>` is the empty element):
+
+```
+304502210097e8b384e9f20b948bf59db35557fb8897996839d89a3632a5ca5ebf424617800220267ddf20cb3cef235d9a251fa11443228d9e3901cca939214fcffd934c664a0701 <> 76a914451d94046f252c4e93c380a2023bbad0c953b31d8763ac672102b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b48927c8201208763a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888527c21034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea52ae67750300350cb175ac6851b27568
+```
+
+Fully signed (serialized with witness):
+
+```
+020000000001015a294b75a1b592d11670560d0e7976fabaac0779292f2aaa4096e81f73e591c702000000000100000001200300000000000016001414dc9d213971a3b25a3d6ee821b7bb9c5881f93b0348304502210097e8b384e9f20b948bf59db35557fb8897996839d89a3632a5ca5ebf424617800220267ddf20cb3cef235d9a251fa11443228d9e3901cca939214fcffd934c664a0701008e76a914451d94046f252c4e93c380a2023bbad0c953b31d8763ac672102b30063771e94c4b693f352523594325c91c5549994d23010c97d4f937d1b48927c8201208763a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888527c21034c04350dce482e60575f6e4bd8f6c2a9ec4f0498ab612ea692bc2afb6918feea52ae67750300350cb175ac6851b2756800350c00
+```
+
+#### D.6.8.3 S's view: R's direct preimage claim of voucher 1
+
+Spends output 2 of S's commitment (1000 sat, offered-HTLC script) through the
+preimage branch with R's own key and `t_1`: no second-stage signature is needed (9.5.1).
+`nSequence = 1` (anchor CSV), `nLockTime = 0`, 200 sat nominal fee, remainder to R's sweep P2WPKH.
+beignet builder: `buildRemoteHtlcPreimageClaimTx` + `buildRemoteHtlcPreimageWitness`.
+
+| Field | Value |
+|---|---|
+| txid | `0c18f923ba9c2da30aed8997c827248ea89bded1127fb948e5fccf38c4569753` |
+| sighash type | `SIGHASH_ALL` (0x01) |
+| sighash signed here | `a92cc5f74ed86fde8192948fb42d7a155fbba8306debb288a589d2a7a1877bbd` |
+| witness layout | `<R htlc sig, DER+0x01> <t_1> <offered-HTLC witness script>` |
+| R HTLC privkey on this commitment | `50fc1cf359e5cb8cf5cd0cab20c32ef9b97514332ec8672ec30d8bb408d5a1e0` |
+| R signature (compact) | `8769a9651e599eb90f0d6344593713aae280e13e2536e35ca6373df06fbc8c3c1637457e94d71fd0eac49fea751f202e3ef32d66cad854133a72fe19fccbca9f` |
+| destination (R sweep P2WPKH) | `00142912535a2c1e5ff06a41e0e70341c839d40cfbd3` |
+
+Unsigned:
+
+```
+0200000001d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de820200000000010000000120030000000000001600142912535a2c1e5ff06a41e0e70341c839d40cfbd300000000
+```
+
+Witness stack (space-separated; `<>` is the empty element):
+
+```
+30450221008769a9651e599eb90f0d6344593713aae280e13e2536e35ca6373df06fbc8c3c02201637457e94d71fd0eac49fea751f202e3ef32d66cad854133a72fe19fccbca9f01 2844e487856ac207d67b8c1c60ed43adf76cd50df7262fba665046fc4a6762db 76a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888ac6851b27568
+```
+
+Fully signed (serialized with witness):
+
+```
+02000000000101d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de820200000000010000000120030000000000001600142912535a2c1e5ff06a41e0e70341c839d40cfbd3034830450221008769a9651e599eb90f0d6344593713aae280e13e2536e35ca6373df06fbc8c3c02201637457e94d71fd0eac49fea751f202e3ef32d66cad854133a72fe19fccbca9f01202844e487856ac207d67b8c1c60ed43adf76cd50df7262fba665046fc4a6762db8876a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888ac6851b2756800000000
+```
+
+#### D.6.8.4 S's view: HTLC-timeout transaction for voucher 1 (S recovers after T_exp)
+
+Spends output 2 of S's commitment. Zero fee, `nSequence = 1`, `nLockTime = T_exp = 800000`,
+single output of the full amount to the CSV-delayed script (revocation key or S's delayed key
+after `to_self_delay = 144`). R's signature is the `htlc_signature` R sent in its setup
+`commitment_signed` (9.5.1 step 4).
+
+| Field | Value |
+|---|---|
+| txid | `056e8dae2184cb21a5190de3329050790487fd54edb952a2a77d649b428df4ed` |
+| sighash type | S: `SIGHASH_ALL` (0x01); R: `SIGHASH_SINGLE|ANYONECANPAY` (0x83), sighash in the S-view table above |
+| sighash signed here | `c3391993f36108b4bc75b493fc6c95952989d8b70299b2c58e4011e9bfc16fde` |
+| witness layout | `0 <R htlc sig, DER+0x83> <S htlc sig, DER+0x01> <> <offered-HTLC witness script>` |
+| S HTLC privkey on this commitment | `fe4bbc9895cc32b31c294b8d763a8637b413f591d4f020982b06e293c8c135b1` |
+| S signature (compact) | `b690a75cef1957f581b5f1faee99c4c95d91fc27022459a4aee1961096e33267237f53a7ce98aff3164be37f5b64d08fde3d022bbc6675af346e52b593723c44` |
+| S signature (DER + 0x01) | `3045022100b690a75cef1957f581b5f1faee99c4c95d91fc27022459a4aee1961096e332670220237f53a7ce98aff3164be37f5b64d08fde3d022bbc6675af346e52b593723c4401` |
+| R signature (DER + 0x83) | `3045022100ee5c7d35c1e6cbab3cc316d10e11defebf1297201a7006d5396cedd8d3ef971a02207327cab1bca34d359ba20639807650928f22f767a3ede26f6ed0dde9079766ad83` |
+
+Unsigned:
+
+```
+0200000001d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de8202000000000100000001e803000000000000220020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db68600350c00
+```
+
+Witness stack (space-separated; `<>` is the empty element):
+
+```
+<> 3045022100ee5c7d35c1e6cbab3cc316d10e11defebf1297201a7006d5396cedd8d3ef971a02207327cab1bca34d359ba20639807650928f22f767a3ede26f6ed0dde9079766ad83 3045022100b690a75cef1957f581b5f1faee99c4c95d91fc27022459a4aee1961096e332670220237f53a7ce98aff3164be37f5b64d08fde3d022bbc6675af346e52b593723c4401 <> 76a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888ac6851b27568
+```
+
+Fully signed (serialized with witness):
+
+```
+02000000000101d76e272a1353cd34eb8ee2eeefe8783f24b77a0d5424ffb253961af387d7de8202000000000100000001e803000000000000220020ffc926acab2a33451aa40abb548de617d2c7fb93751971cfea75fcd5e11db6860500483045022100ee5c7d35c1e6cbab3cc316d10e11defebf1297201a7006d5396cedd8d3ef971a02207327cab1bca34d359ba20639807650928f22f767a3ede26f6ed0dde9079766ad83483045022100b690a75cef1957f581b5f1faee99c4c95d91fc27022459a4aee1961096e332670220237f53a7ce98aff3164be37f5b64d08fde3d022bbc6675af346e52b593723c4401008876a914769f4ef7c85e25eeaba82c3d63a09ce8184c712c8763ac67210249646380c1ecae2acc028b634d4b4355fbf003b61e83c6882f97d12d14bcaf5c7c820120876475527c2102f2a3e20a8725660b4de4deab650fe10559eba33532f89a00dba1f96e4ac85c9c52ae67a914fb718a0b71a64ce29f6c5d3c18e0bc1d9066078888ac6851b2756800350c00
+```
+
+## D.7 Verification performed by the generator
 
 Every line below is a hard assertion in the generator: it refuses to emit
 this file if any fails. Scenario-tagged lines were checked in that scenario;
@@ -2386,8 +2811,8 @@ untagged lines are cross-scenario or fixture checks.
 15. [D.1] S holds budget + S channel_reserve spendable: 7000000 sat >= 1000 + 10000
 16. [D.1] funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve: 6999000 - 10000 >= 3240 + 660
 17. [D.1] funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve: 6999000 - 10000 >= 6480 + 660
-18. [D.1] both post-round balances >= channel_reserve: S 6995100 sat, R 3000000 sat, reserve 10000
-19. [D.1] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
+18. [D.1] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6995100 sat, R 3000000 sat (S funds: R not applied), reserve 10000
+19. [D.1] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
 20. [D.1] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 0
 21. [D.1] all 1 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
 22. [D.1] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
@@ -2432,8 +2857,8 @@ untagged lines are cross-scenario or fixture checks.
 61. [D.2] S holds budget + S channel_reserve spendable: 7000000 sat >= 51289 + 10000
 62. [D.2] funder (S) covers fee(K=3) + anchors at the frozen rate above its reserve: 6948710 - 10000 >= 4100 + 660
 63. [D.2] funder (S) fee-spike buffer: fee(K=3) at 2 x feerate + anchors above its reserve: 6948710 - 10000 >= 8200 + 660
-64. [D.2] both post-round balances >= channel_reserve: S 6943950 sat, R 3000000 sat, reserve 10000
-65. [D.2] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
+64. [D.2] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6943950 sat, R 3000000 sat (S funds: R not applied), reserve 10000
+65. [D.2] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
 66. [D.2] s_htlc_id_k = s_htlc_id_base + k - 1: ids 7 .. 9
 67. [D.2] all 3 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
 68. [D.2] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
@@ -2478,8 +2903,8 @@ untagged lines are cross-scenario or fixture checks.
 107. [D.3] S holds budget + S channel_reserve spendable: 7000000 sat >= 51289 + 10000
 108. [D.3] funder (R) covers fee(K=3) + anchors at the frozen rate above its reserve: 3000000 - 10000 >= 4100 + 660
 109. [D.3] funder (R) fee-spike buffer: fee(K=3) at 2 x feerate + anchors above its reserve: 3000000 - 10000 >= 8200 + 660
-110. [D.3] both post-round balances >= channel_reserve: S 6948710 sat, R 2995240 sat, reserve 10000
-111. [D.3] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
+110. [D.3] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6948710 sat, R 2995240 sat (R funds: checked), reserve 10000
+111. [D.3] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
 112. [D.3] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 2
 113. [D.3] all 3 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
 114. [D.3] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
@@ -2524,8 +2949,8 @@ untagged lines are cross-scenario or fixture checks.
 153. [D.4] S holds budget + S channel_reserve spendable: 7000000 sat >= 546 + 10000
 154. [D.4] funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve: 6999454 - 10000 >= 3240 + 660
 155. [D.4] funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve: 6999454 - 10000 >= 6480 + 660
-156. [D.4] both post-round balances >= channel_reserve: S 6995554 sat, R 3000000 sat, reserve 10000
-157. [D.4] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
+156. [D.4] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6995554 sat, R 3000000 sat (S funds: R not applied), reserve 10000
+157. [D.4] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
 158. [D.4] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 0
 159. [D.4] all 1 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
 160. [D.4] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
@@ -2571,8 +2996,8 @@ untagged lines are cross-scenario or fixture checks.
 200. [D.5] S holds budget + S channel_reserve spendable: 7000000 sat >= 263718 + 10000
 201. [D.5] funder (S) covers fee(K=483) + anchors at the frozen rate above its reserve: 6736282 - 10000 >= 210500 + 660
 202. [D.5] funder (S) fee-spike buffer: fee(K=483) at 2 x feerate + anchors above its reserve: 6736282 - 10000 >= 421000 + 660
-203. [D.5] both post-round balances >= channel_reserve: S 6525122 sat, R 3000000 sat, reserve 10000
-204. [D.5] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
+203. [D.5] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6525122 sat, R 3000000 sat (S funds: R not applied), reserve 10000
+204. [D.5] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
 205. [D.5] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 482
 206. [D.5] all 483 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
 207. [D.5] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
@@ -2602,65 +3027,113 @@ untagged lines are cross-scenario or fixture checks.
 231. [D.5] S-view direct preimage claim by R: R's signature verifies against the offered-HTLC script
 232. [D.5] S-view HTLC-timeout: S's own signature (SIGHASH_ALL) verifies
 233. [D.5] S-view HTLC-timeout: R's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
-234. [D.2 vs D.3] the voucher output order on R's view is the same whichever side funds (BOLT 3 order depends on amount and script, not on the funder)
-235. [D.2] R-view output layout is anchor,anchor,voucher_2,voucher_1,voucher_3,to_local,to_remote: the Appendix A C_3 layout (voucher 2 at 546 sat sorts before voucher 1 at 994 sat)
-236. [D.2] R-view to_local 3000000 / to_remote 6943950 sat equal Appendix A C_3's values (same balances, same fee, keys differ)
-237. [D.5] both views carry 483 untrimmed voucher outputs
-238. [D.5] ff_init (4043 bytes) and ff_accept (19510 bytes) fit a BOLT 8 message
-239. [D.1] H_1 != SHA256(per_commitment_secret_S[n]) for every n in 0..n0 (7.2 Variant D binding forbidden)
-240. [D.1] ff_init: R's node-key signature verifies from the wire bytes alone (strict low-S)
-241. [D.1] ff_accept: S's node-key signature verifies from the wire bytes alone (strict low-S)
-242. [D.1] ff_accept carries TLV 11 = T_init and a TLV 9 byte-identical to ff_init's
-243. [D.1] variant == 4, G == 0, TLVs 1/3/5 absent from ff_init: variant 4, G 0
-244. [D.1] sum(d_k) == budget_msat: 1000000 msat
-245. [D.1] K <= 483 and K <= R max_accepted_htlcs: K = 1
-246. [D.1] sum(d_k) <= R max_htlc_value_in_flight_msat: 1000000 <= 5000000000
-247. [D.1] every d_k >= min_payment_msat: min d_k = 1000000 >= 546000
-248. [D.1] every d_k >= htlc_minimum_msat: min d_k = 1000000 >= 1
-249. [D.1] no d_k trims (floor(d_k/1000) >= dust_limit, zero second-level fee under anchors): min output 1000 sat >= 546
-250. [D.1] no overflow: d_k * fee_ppm and gross_into_S(d_k) <= 2^64 - 1: max d_k * ppm = 5000000000
-251. [D.1] S holds budget + S channel_reserve spendable: 7000000 sat >= 1000 + 10000
-252. [D.1] funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve: 6999000 - 10000 >= 3240 + 660
-253. [D.1] funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve: 6999000 - 10000 >= 6480 + 660
-254. [D.1] both post-round balances >= channel_reserve: S 6995100 sat, R 3000000 sat, reserve 10000
-255. [D.1] T_exp >= D + 1008 and D < T_exp - claim_margin: 800000 - 798992 = 1008
-256. [D.1] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 0
-257. [D.1] all 1 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
-258. [D.1] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
-259. [D.1] R-view: S's commitment signature verifies (beignet verifyRemoteCommitmentSig)
-260. [D.1] R-view: S's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
-261. [D.1] R-view: S's commitment signature verifies independently against the BIP 143 sighash of the funding input
-262. [D.1] R-view: tx hex round-trips through the decoder to the same txid
-263. [D.1] R-view: static_remotekey, to_remote pays S's payment basepoint
-264. [D.1] R-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
-265. [D.1] R-view: to_local = 3000000 and to_remote = 6995100 sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
-266. [D.1] R-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and S's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-success transaction
-267. [D.1] S-view: S's own rebuild (buildLocalCommitment) is byte-identical to R's construction (buildRemoteCommitment)
-268. [D.1] S-view: R's commitment signature verifies (beignet verifyRemoteCommitmentSig)
-269. [D.1] S-view: R's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
-270. [D.1] S-view: R's commitment signature verifies independently against the BIP 143 sighash of the funding input
-271. [D.1] S-view: tx hex round-trips through the decoder to the same txid
-272. [D.1] S-view: static_remotekey, to_remote pays R's payment basepoint
-273. [D.1] S-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
-274. [D.1] S-view: to_local = 6995100 and to_remote = 3000000 sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
-275. [D.1] S-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and R's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-timeout transaction
-276. [D.1] ff_activate: R's node-key signature verifies from the wire bytes alone
-277. [D.1] ff_activate_ack: S's node-key signature verifies from the wire bytes alone
-278. [D.1] R-view HTLC-success: R's own signature (SIGHASH_ALL) verifies
-279. [D.1] R-view HTLC-success: S's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
-280. [D.1] preimage t_1 hashes to H_1
-281. [D.1] R-view direct timeout spend by S: S's signature verifies against the received-HTLC script
-282. [D.1] S-view direct preimage claim by R: R's signature verifies against the offered-HTLC script
-283. [D.1] S-view HTLC-timeout: S's own signature (SIGHASH_ALL) verifies
-284. [D.1] S-view HTLC-timeout: R's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
-285. [D.1] a second in-process run reproduces every message, onion, commitment and hash byte-for-byte
+234. [D.6] H_1 != SHA256(per_commitment_secret_S[n]) for every n in 0..n0 (7.2 Variant D binding forbidden)
+235. [D.6] ff_init: R's node-key signature verifies from the wire bytes alone (strict low-S)
+236. [D.6] ff_accept: S's node-key signature verifies from the wire bytes alone (strict low-S)
+237. [D.6] ff_accept carries TLV 11 = T_init and a TLV 9 byte-identical to ff_init's
+238. [D.6] variant == 4, G == 0, TLVs 1/3/5 absent from ff_init: variant 4, G 0
+239. [D.6] sum(d_k) == budget_msat: 1000000 msat
+240. [D.6] K <= 483 and K <= R max_accepted_htlcs: K = 1
+241. [D.6] sum(d_k) <= R max_htlc_value_in_flight_msat: 1000000 <= 5000000000
+242. [D.6] every d_k >= min_payment_msat: min d_k = 1000000 >= 546000
+243. [D.6] every d_k >= htlc_minimum_msat: min d_k = 1000000 >= 1
+244. [D.6] no d_k trims (floor(d_k/1000) >= dust_limit, zero second-level fee under anchors): min output 1000 sat >= 546
+245. [D.6] no overflow: d_k * fee_ppm and gross_into_S(d_k) <= 2^64 - 1: max d_k * ppm = 5000000000
+246. [D.6] S holds budget + S channel_reserve spendable: 10000000 sat >= 1000 + 10000
+247. [D.6] funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve: 9999000 - 10000 >= 3240 + 660
+248. [D.6] funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve: 9999000 - 10000 >= 6480 + 660
+249. [D.6] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 9995100 sat, R 0 sat (S funds: R not applied), reserve 10000
+250. [D.6] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
+251. [D.6] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 0
+252. [D.6] all 1 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
+253. [D.6] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
+254. [D.6] R-view: S's commitment signature verifies (beignet verifyRemoteCommitmentSig)
+255. [D.6] R-view: S's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
+256. [D.6] R-view: S's commitment signature verifies independently against the BIP 143 sighash of the funding input
+257. [D.6] R-view: tx hex round-trips through the decoder to the same txid
+258. [D.6] R-view: static_remotekey, to_remote pays S's payment basepoint
+259. [D.6] R-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
+260. [D.6] R-view: to_local omitted (0 sat < dust_limit) and to_remote = 9995100 sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
+261. [D.6] R-view: both anchors are present although `to_local` (R) is omitted (the commitment carries an untrimmed HTLC)
+262. [D.6] R-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and S's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-success transaction
+263. [D.6] S-view: S's own rebuild (buildLocalCommitment) is byte-identical to R's construction (buildRemoteCommitment)
+264. [D.6] S-view: R's commitment signature verifies (beignet verifyRemoteCommitmentSig)
+265. [D.6] S-view: R's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
+266. [D.6] S-view: R's commitment signature verifies independently against the BIP 143 sighash of the funding input
+267. [D.6] S-view: tx hex round-trips through the decoder to the same txid
+268. [D.6] S-view: static_remotekey, to_remote pays R's payment basepoint
+269. [D.6] S-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
+270. [D.6] S-view: to_local = 9995100 and to_remote omitted (0 sat < dust_limit) sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
+271. [D.6] S-view: both anchors are present although `to_remote` (R) is omitted (the commitment carries an untrimmed HTLC)
+272. [D.6] S-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and R's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-timeout transaction
+273. [D.6] ff_activate: R's node-key signature verifies from the wire bytes alone
+274. [D.6] ff_activate_ack: S's node-key signature verifies from the wire bytes alone
+275. [D.6] R-view HTLC-success: R's own signature (SIGHASH_ALL) verifies
+276. [D.6] R-view HTLC-success: S's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
+277. [D.6] preimage t_1 hashes to H_1
+278. [D.6] R-view direct timeout spend by S: S's signature verifies against the received-HTLC script
+279. [D.6] S-view direct preimage claim by R: R's signature verifies against the offered-HTLC script
+280. [D.6] S-view HTLC-timeout: S's own signature (SIGHASH_ALL) verifies
+281. [D.6] S-view HTLC-timeout: R's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
+282. [D.2 vs D.3] the voucher output order on R's view is the same whichever side funds (BOLT 3 order depends on amount and script, not on the funder)
+283. [D.2] R-view output layout is anchor,anchor,voucher_2,voucher_1,voucher_3,to_local,to_remote: the Appendix A C_3 layout (voucher 2 at 546 sat sorts before voucher 1 at 994 sat)
+284. [D.2] R-view to_local 3000000 / to_remote 6943950 sat equal Appendix A C_3's values (same balances, same fee, keys differ)
+285. [D.5] both views carry 483 untrimmed voucher outputs
+286. [D.5] ff_init (4043 bytes) and ff_accept (19510 bytes) fit a BOLT 8 message
+287. [D.1] H_1 != SHA256(per_commitment_secret_S[n]) for every n in 0..n0 (7.2 Variant D binding forbidden)
+288. [D.1] ff_init: R's node-key signature verifies from the wire bytes alone (strict low-S)
+289. [D.1] ff_accept: S's node-key signature verifies from the wire bytes alone (strict low-S)
+290. [D.1] ff_accept carries TLV 11 = T_init and a TLV 9 byte-identical to ff_init's
+291. [D.1] variant == 4, G == 0, TLVs 1/3/5 absent from ff_init: variant 4, G 0
+292. [D.1] sum(d_k) == budget_msat: 1000000 msat
+293. [D.1] K <= 483 and K <= R max_accepted_htlcs: K = 1
+294. [D.1] sum(d_k) <= R max_htlc_value_in_flight_msat: 1000000 <= 5000000000
+295. [D.1] every d_k >= min_payment_msat: min d_k = 1000000 >= 546000
+296. [D.1] every d_k >= htlc_minimum_msat: min d_k = 1000000 >= 1
+297. [D.1] no d_k trims (floor(d_k/1000) >= dust_limit, zero second-level fee under anchors): min output 1000 sat >= 546
+298. [D.1] no overflow: d_k * fee_ppm and gross_into_S(d_k) <= 2^64 - 1: max d_k * ppm = 5000000000
+299. [D.1] S holds budget + S channel_reserve spendable: 7000000 sat >= 1000 + 10000
+300. [D.1] funder (S) covers fee(K=1) + anchors at the frozen rate above its reserve: 6999000 - 10000 >= 3240 + 660
+301. [D.1] funder (S) fee-spike buffer: fee(K=1) at 2 x feerate + anchors above its reserve: 6999000 - 10000 >= 6480 + 660
+302. [D.1] S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds: S 6995100 sat, R 3000000 sat (S funds: R not applied), reserve 10000
+303. [D.1] T_exp - D >= claim_margin (1008): 800000 - 798992 = 1008
+304. [D.1] s_htlc_id_k = s_htlc_id_base + k - 1: ids 0 .. 0
+305. [D.1] all 1 voucher onions (1366 bytes, single hop to R's node key, associated data H_k) decode on R's side with beignet's processOnionPacket as a final hop with exactly the 9.5.1 payload
+306. [D.1] R-view: R's own rebuild (buildLocalCommitment) is byte-identical to S's construction (buildRemoteCommitment)
+307. [D.1] R-view: S's commitment signature verifies (beignet verifyRemoteCommitmentSig)
+308. [D.1] R-view: S's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
+309. [D.1] R-view: S's commitment signature verifies independently against the BIP 143 sighash of the funding input
+310. [D.1] R-view: tx hex round-trips through the decoder to the same txid
+311. [D.1] R-view: static_remotekey, to_remote pays S's payment basepoint
+312. [D.1] R-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
+313. [D.1] R-view: to_local = 3000000 and to_remote = 6995100 sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
+314. [D.1] R-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and S's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-success transaction
+315. [D.1] S-view: S's own rebuild (buildLocalCommitment) is byte-identical to R's construction (buildRemoteCommitment)
+316. [D.1] S-view: R's commitment signature verifies (beignet verifyRemoteCommitmentSig)
+317. [D.1] S-view: R's 1 htlc_signature(s) verify (beignet verifyRemoteHtlcSignatures)
+318. [D.1] S-view: R's commitment signature verifies independently against the BIP 143 sighash of the funding input
+319. [D.1] S-view: tx hex round-trips through the decoder to the same txid
+320. [D.1] S-view: static_remotekey, to_remote pays R's payment basepoint
+321. [D.1] S-view: 1 voucher outputs and 1 htlc_signatures, none trimmed
+322. [D.1] S-view: to_local = 6995100 and to_remote = 3000000 sat, i.e. floor(msat balance / 1000) with fee 3240 + anchors 660 charged to the funder (S) and sub-satoshi remainders left to the on-chain fee
+323. [D.1] S-view: every voucher output has value floor(d_k / 1000), cltv_expiry T_exp, scriptPubKey = P2WSH of the reconstructed BOLT 3 HTLC script, and R's htlc_signature verifies independently (strict low-S) against the SIGHASH_SINGLE|ANYONECANPAY digest of its HTLC-timeout transaction
+324. [D.1] ff_activate: R's node-key signature verifies from the wire bytes alone
+325. [D.1] ff_activate_ack: S's node-key signature verifies from the wire bytes alone
+326. [D.1] R-view HTLC-success: R's own signature (SIGHASH_ALL) verifies
+327. [D.1] R-view HTLC-success: S's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
+328. [D.1] preimage t_1 hashes to H_1
+329. [D.1] R-view direct timeout spend by S: S's signature verifies against the received-HTLC script
+330. [D.1] S-view direct preimage claim by R: R's signature verifies against the offered-HTLC script
+331. [D.1] S-view HTLC-timeout: S's own signature (SIGHASH_ALL) verifies
+332. [D.1] S-view HTLC-timeout: R's setup-time htlc_signature (SINGLE|ANYONECANPAY) verifies over the same transaction
+333. [D.1] a second in-process run reproduces every message, onion, commitment and hash byte-for-byte
 
 Independent means: verified with beignet's `verify(..., strict = true)` against
 a sighash computed here (`hashForWitnessV0`) rather than through the channel
 verifier. Every commitment and second-level transaction was additionally
 round-tripped through the transaction decoder.
 
-## D.7 Conventions adopted and spec feedback
+## D.8 Conventions adopted and spec feedback
 
 Byte-level conventions these vectors follow. Each was an implementer's choice
 in the first draft of v0.9 and is now normative text in the section named, so
@@ -2685,7 +3158,7 @@ an implementation that matches these vectors matches the spec.
 7. **Appendix A.** `D = 798,992 = T_exp - 1008` in both appendices; `D` enters
    no commitment, so Appendix A's transactions are unchanged.
 
-## D.8 How to regenerate
+## D.9 How to regenerate
 
 ```sh
 cd <beignet repo>   # sibling of the specs repo, master branch

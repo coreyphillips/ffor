@@ -354,11 +354,13 @@ const ANCHOR_TOTAL_SAT = 660n;
 // floor voucher of 546 sat still leaves a non-dust P2WPKH output).
 const CLAIM_FEE_SAT = 200n;
 
-// Pre-round balances, the same in every scenario: S holds 7,000,000 sat and R
-// holds 3,000,000 sat. Only the funder role changes between D.2 and D.3, so the
-// two transcripts differ exactly where the funder's obligations move.
-const S_BALANCE_MSAT_PRE = 7_000_000_000n;
+// Pre-round balances. D.1 to D.5: S holds 7,000,000 sat and R holds
+// 3,000,000 sat; only the funder role changes between D.2 and D.3, so the two
+// transcripts differ exactly where the funder's obligations move. D.6 gives R
+// a zero pre-round balance (S holds the whole 10,000,000 sat). A scenario's S
+// balance is always funding minus R's balance.
 const R_BALANCE_MSAT_PRE = 3_000_000_000n;
+const S_BALANCE_MSAT_PRE = FUNDING_SAT * 1000n - R_BALANCE_MSAT_PRE;
 
 const U64_MAX = (1n << 64n) - 1n;
 
@@ -423,14 +425,15 @@ const rSigner = new ChannelSigner(R_FUNDING_PRIV, R_PAYMENT_BASEPOINT_SECRET);
 type Funder = 'S' | 'R';
 
 /** Fresh mirrored channel states for the given funder, at the pre-round numbers. */
-function makeStates(funder: Funder): { sState: IChannelState; rState: IChannelState } {
+function makeStates(funder: Funder, rPreMsat: bigint): { sState: IChannelState; rState: IChannelState } {
+	const sPreMsat = FUNDING_SAT * 1000n - rPreMsat;
 	let sState: IChannelState;
 	let rState: IChannelState;
 	if (funder === 'S') {
 		sState = createOpenerState({
 			temporaryChannelId: Buffer.alloc(32),
 			fundingSatoshis: FUNDING_SAT,
-			pushMsat: R_BALANCE_MSAT_PRE,
+			pushMsat: rPreMsat,
 			localConfig: { ...CONFIG },
 			localBasepoints: sBasepoints,
 			localPerCommitmentSeed: S_PC_SEED
@@ -440,7 +443,7 @@ function makeStates(funder: Funder): { sState: IChannelState; rState: IChannelSt
 		rState = createAcceptorState({
 			temporaryChannelId: Buffer.alloc(32),
 			fundingSatoshis: FUNDING_SAT,
-			pushMsat: R_BALANCE_MSAT_PRE,
+			pushMsat: rPreMsat,
 			localConfig: { ...CONFIG },
 			localBasepoints: rBasepoints,
 			localPerCommitmentSeed: R_PC_SEED,
@@ -451,7 +454,7 @@ function makeStates(funder: Funder): { sState: IChannelState; rState: IChannelSt
 		rState = createOpenerState({
 			temporaryChannelId: Buffer.alloc(32),
 			fundingSatoshis: FUNDING_SAT,
-			pushMsat: S_BALANCE_MSAT_PRE,
+			pushMsat: sPreMsat,
 			localConfig: { ...CONFIG },
 			localBasepoints: rBasepoints,
 			localPerCommitmentSeed: R_PC_SEED
@@ -461,7 +464,7 @@ function makeStates(funder: Funder): { sState: IChannelState; rState: IChannelSt
 		sState = createAcceptorState({
 			temporaryChannelId: Buffer.alloc(32),
 			fundingSatoshis: FUNDING_SAT,
-			pushMsat: S_BALANCE_MSAT_PRE,
+			pushMsat: sPreMsat,
 			localConfig: { ...CONFIG },
 			localBasepoints: sBasepoints,
 			localPerCommitmentSeed: S_PC_SEED,
@@ -480,8 +483,8 @@ function makeStates(funder: Funder): { sState: IChannelState; rState: IChannelSt
 	sState.remoteCommitmentNumber = N_R;
 	rState.localCommitmentNumber = N_R;
 	rState.remoteCommitmentNumber = N0;
-	assert(sState.localBalanceMsat === S_BALANCE_MSAT_PRE, 'S pre-round balance');
-	assert(rState.localBalanceMsat === R_BALANCE_MSAT_PRE, 'R pre-round balance');
+	assert(sState.localBalanceMsat === sPreMsat, 'S pre-round balance');
+	assert(rState.localBalanceMsat === rPreMsat, 'R pre-round balance');
 	return { sState, rState };
 }
 
@@ -496,6 +499,7 @@ interface IScenario {
 	amounts: bigint[];
 	sHtlcIdBase: bigint;
 	abbreviated: boolean; // D.5: txids, hashes, first/last voucher only
+	rPreMsat: bigint; // R's pre-round balance (S holds funding minus this)
 	intro: string[];
 }
 
@@ -507,6 +511,7 @@ const SCENARIOS: IScenario[] = [
 		amounts: [1_000_000n],
 		sHtlcIdBase: 0n,
 		abbreviated: false,
+		rPreMsat: R_BALANCE_MSAT_PRE,
 		intro: [
 			'The minimal transcript: one voucher of 1,000,000 msat on a channel `S`',
 			'opened and funds. `s_htlc_id_base = 0`: `S` has never offered an HTLC on',
@@ -520,6 +525,7 @@ const SCENARIOS: IScenario[] = [
 		amounts: [994_000n, 546_250n, 49_749_000n],
 		sHtlcIdBase: 7n,
 		abbreviated: false,
+		rPreMsat: R_BALANCE_MSAT_PRE,
 		intro: [
 			'The three payee amounts of Appendix A (`994,000`, `546,250`, `49,749,000`',
 			'msat) added in ONE voucher round. `R`\'s view is therefore its commitment',
@@ -541,6 +547,7 @@ const SCENARIOS: IScenario[] = [
 		amounts: [994_000n, 546_250n, 49_749_000n],
 		sHtlcIdBase: 0n,
 		abbreviated: false,
+		rPreMsat: R_BALANCE_MSAT_PRE,
 		intro: [
 			'The same three amounts and the same balances as D.2 (`S` 7,000,000 sat,',
 			'`R` 3,000,000 sat), but `R` opened and funds the channel. BOLT 3 charges',
@@ -559,6 +566,7 @@ const SCENARIOS: IScenario[] = [
 		amounts: [546_000n],
 		sHtlcIdBase: 0n,
 		abbreviated: false,
+		rPreMsat: R_BALANCE_MSAT_PRE,
 		intro: [
 			'One voucher at exactly `min_payment_msat = 546,000` msat, whose output is',
 			'`546` sat = `dust_limit_satoshis`: the smallest voucher the profile admits',
@@ -576,6 +584,7 @@ const SCENARIOS: IScenario[] = [
 		amounts: Array.from({ length: 483 }, () => 546_000n),
 		sHtlcIdBase: 0n,
 		abbreviated: true,
+		rPreMsat: R_BALANCE_MSAT_PRE,
 		intro: [
 			'`K = 483 = max_accepted_htlcs`, every voucher at the floor `546,000` msat',
 			'(`budget_msat = 263,718,000`). This section is abbreviated: the messages',
@@ -584,6 +593,27 @@ const SCENARIOS: IScenario[] = [
 			'Everything omitted is reproduced by the generator. Note that 483 equal',
 			'amounts make BOLT 3 order the voucher outputs purely by scriptPubKey, so',
 			'voucher 1 and voucher 483 land at output indices unrelated to `k`.'
+		]
+	},
+	{
+		id: 'D.6',
+		title: 'K = 1, S opener and funder, R holds zero pre-epoch balance',
+		funder: 'S',
+		amounts: [1_000_000n],
+		sHtlcIdBase: 0n,
+		abbreviated: false,
+		rPreMsat: 0n,
+		intro: [
+			'The motivating case: `S` opened and funds the channel, holds all 10,000,000',
+			'sat, and `R` has received nothing yet (a fresh inbound-only channel). One',
+			'voucher of 1,000,000 msat, as in D.1. Because `R`\'s balance is 0 msat, BOLT 3',
+			'omits its main output on both views (`to_local` on `R`\'s view, `to_remote`',
+			'on `S`\'s view: 0 sat is below `dust_limit`); its anchor is still present',
+			'because the commitment carries an untrimmed HTLC. Section 8 constrains only',
+			'the funder\'s balance by its reserve when `S` funds, so `R`\'s zero balance',
+			'is legal and the setup-checks row for `R` reads "not applied". The voucher',
+			'output, both signatures and every claim path are unaffected: `R`\'s claim',
+			'needs only the HTLC output and `t_1`, never a main output.'
 		]
 	}
 ];
@@ -634,6 +664,7 @@ interface ICommitView {
 	vouchers: IVoucherOnView[];
 	keys: ICommitmentKeys;
 	wireSha256: Buffer;
+	absentNote?: string;
 }
 
 interface ICheckRow {
@@ -801,19 +832,29 @@ function runScenario(sc: IScenario): IScenarioResult {
 	row('every d_k >= htlc_minimum_msat', `min d_k = ${minD} >= ${HTLC_MINIMUM_MSAT}`, sc.amounts.every((d) => d >= HTLC_MINIMUM_MSAT));
 	row('no d_k trims (floor(d_k/1000) >= dust_limit, zero second-level fee under anchors)', `min output ${minD / 1000n} sat >= ${DUST_LIMIT_SAT}`, sc.amounts.every((d) => d / 1000n >= DUST_LIMIT_SAT));
 	row('no overflow: d_k * fee_ppm and gross_into_S(d_k) <= 2^64 - 1', `max d_k * ppm = ${sc.amounts.reduce((a, b) => (b > a ? b : a)) * FEE_PROP_MILLIONTHS}`, sc.amounts.every((d) => d * FEE_PROP_MILLIONTHS <= U64_MAX && d + forwardingFee(d) <= U64_MAX));
-	row('S holds budget + S channel_reserve spendable', `${S_BALANCE_MSAT_PRE / 1000n} sat >= ${budget / 1000n} + ${CHANNEL_RESERVE_SAT}`, S_BALANCE_MSAT_PRE >= budget + CHANNEL_RESERVE_SAT * 1000n);
+	const sPreMsat = FUNDING_SAT * 1000n - sc.rPreMsat;
+	row('S holds budget + S channel_reserve spendable', `${sPreMsat / 1000n} sat >= ${budget / 1000n} + ${CHANNEL_RESERVE_SAT}`, sPreMsat >= budget + CHANNEL_RESERVE_SAT * 1000n);
 	const feeFrozen = calculateCommitmentFee(FEERATE_PER_KW, K, true, false);
 	const feeSpike = calculateCommitmentFee(2 * FEERATE_PER_KW, K, true, false);
-	const sAfterMsat = S_BALANCE_MSAT_PRE - budget;
-	const funderAfterSat = (sc.funder === 'S' ? sAfterMsat : R_BALANCE_MSAT_PRE) / 1000n;
+	const sAfterMsat = sPreMsat - budget;
+	const funderAfterSat = (sc.funder === 'S' ? sAfterMsat : sc.rPreMsat) / 1000n;
 	const funderCostFrozen = feeFrozen + ANCHOR_TOTAL_SAT;
 	const funderCostSpike = feeSpike + ANCHOR_TOTAL_SAT;
 	row(`funder (${sc.funder}) covers fee(K=${K}) + anchors at the frozen rate above its reserve`, `${funderAfterSat} - ${CHANNEL_RESERVE_SAT} >= ${feeFrozen} + ${ANCHOR_TOTAL_SAT}`, funderAfterSat - CHANNEL_RESERVE_SAT >= funderCostFrozen);
 	row(`funder (${sc.funder}) fee-spike buffer: fee(K=${K}) at 2 x feerate + anchors above its reserve`, `${funderAfterSat} - ${CHANNEL_RESERVE_SAT} >= ${feeSpike} + ${ANCHOR_TOTAL_SAT}`, funderAfterSat - CHANNEL_RESERVE_SAT >= funderCostSpike);
 	const sPostSat = sAfterMsat / 1000n - (sc.funder === 'S' ? funderCostFrozen : 0n);
-	const rPostSat = R_BALANCE_MSAT_PRE / 1000n - (sc.funder === 'R' ? funderCostFrozen : 0n);
-	row('both post-round balances >= channel_reserve', `S ${sPostSat} sat, R ${rPostSat} sat, reserve ${CHANNEL_RESERVE_SAT}`, sPostSat >= CHANNEL_RESERVE_SAT && rPostSat >= CHANNEL_RESERVE_SAT);
-	row('T_exp >= D + 1008 and D < T_exp - claim_margin', `${T_EXP} - ${D_DEADLINE} = ${T_EXP - D_DEADLINE}`, T_EXP - D_DEADLINE >= 1008);
+	const rPostSat = sc.rPreMsat / 1000n - (sc.funder === 'R' ? funderCostFrozen : 0n);
+	// Section 8: S's post-round balance must stay above S's reserve; R's must stay
+	// above R's reserve only when R is the funder. When S funds, R's balance is
+	// unconstrained and may be zero (D.6).
+	row(
+		'S post-round balance >= S channel_reserve; R post-round balance >= R channel_reserve only when R funds',
+		sc.funder === 'R'
+			? `S ${sPostSat} sat, R ${rPostSat} sat (R funds: checked), reserve ${CHANNEL_RESERVE_SAT}`
+			: `S ${sPostSat} sat, R ${rPostSat} sat (S funds: R not applied), reserve ${CHANNEL_RESERVE_SAT}`,
+		sPostSat >= CHANNEL_RESERVE_SAT && (sc.funder !== 'R' || rPostSat >= CHANNEL_RESERVE_SAT)
+	);
+	row('T_exp - D >= claim_margin (1008)', `${T_EXP} - ${D_DEADLINE} = ${T_EXP - D_DEADLINE}`, T_EXP - D_DEADLINE >= 1008);
 	row('s_htlc_id_k = s_htlc_id_base + k - 1', `ids ${vouchers[0].htlcId} .. ${vouchers[K - 1].htlcId}`, vouchers.every((v) => v.htlcId === sc.sHtlcIdBase + BigInt(v.k) - 1n));
 
 	// -- update_add_htlc + voucher onions (9.5.1 step 3) -----------------------
@@ -864,7 +905,7 @@ function runScenario(sc: IScenario): IScenarioResult {
 	);
 
 	// -- Channel states after the round ----------------------------------------
-	const { sState, rState } = makeStates(sc.funder);
+	const { sState, rState } = makeStates(sc.funder, sc.rPreMsat);
 	for (const v of vouchers) {
 		const key = `s-offered-${v.k}`;
 		const base = {
@@ -995,10 +1036,23 @@ function buildView(
 	const signerMsat = holderState.remoteBalanceMsat;
 	const expectedToLocal = holderMsat / 1000n - (holderIsFunder ? feeSat + ANCHOR_TOTAL_SAT : 0n);
 	const expectedToRemote = signerMsat / 1000n - (holderIsFunder ? 0n : feeSat + ANCHOR_TOTAL_SAT);
+	// BOLT 3: a main output below the holder's dust_limit is omitted (D.6: R's
+	// 0 sat balance). The builder reports an omitted output as an undefined index.
+	const mainOutputOk = (idx: number | undefined, expected: bigint): boolean =>
+		expected < DUST_LIMIT_SAT ? idx === undefined : idx !== undefined && BigInt(tx.outs[idx].value) === expected;
+	const describe = (name: string, expected: bigint): string =>
+		expected < DUST_LIMIT_SAT ? `${name} omitted (${expected} sat < dust_limit)` : `${name} = ${expected}`;
 	check(
-		BigInt(tx.outs[om.toLocal!].value) === expectedToLocal && BigInt(tx.outs[om.toRemote!].value) === expectedToRemote,
-		`${tag}: to_local = ${expectedToLocal} and to_remote = ${expectedToRemote} sat, i.e. floor(msat balance / 1000) with fee ${feeSat} + anchors ${ANCHOR_TOTAL_SAT} charged to the funder (${sc.funder}) and sub-satoshi remainders left to the on-chain fee`
+		mainOutputOk(om.toLocal, expectedToLocal) && mainOutputOk(om.toRemote, expectedToRemote),
+		`${tag}: ${describe('to_local', expectedToLocal)} and ${describe('to_remote', expectedToRemote)} sat, i.e. floor(msat balance / 1000) with fee ${feeSat} + anchors ${ANCHOR_TOTAL_SAT} charged to the funder (${sc.funder}) and sub-satoshi remainders left to the on-chain fee`
 	);
+	let absentNote: string | undefined;
+	if (om.toLocal === undefined || om.toRemote === undefined) {
+		const missing = om.toLocal === undefined ? `\`to_local\` (${holder})` : `\`to_remote\` (${signer})`;
+		const anchorsPresent = om.anchorLocal !== undefined && om.anchorRemote !== undefined;
+		check(anchorsPresent, `${tag}: both anchors are present although ${missing} is omitted (the commitment carries an untrimmed HTLC)`);
+		absentNote = `${missing} is omitted: its balance is 0 msat, below \`dust_limit\` (BOLT 3). Both anchors remain because the commitment carries an untrimmed HTLC output. The fee and anchors are charged to \`${sc.funder}\` as usual.`;
+	}
 
 	const vouchersOnView: IVoucherOnView[] = [];
 	for (let i = 0; i < htlcs.length; i++) {
@@ -1049,8 +1103,9 @@ function buildView(
 		else if (idx === om.anchorLocal) kind = `anchor (${holder})`;
 		else if (idx === om.anchorRemote) kind = `anchor (${signer})`;
 		else {
-			const vv = vouchersOnView.find((x) => x.outputIndex === idx)!;
-			kind = holder === 'R' ? `voucher_${vv.k} (received HTLC, S-offered)` : `voucher_${vv.k} (offered HTLC)`;
+			const vv = vouchersOnView.find((x) => x.outputIndex === idx);
+			assert(vv !== undefined, `${tag}: output ${idx} is classified`);
+			kind = holder === 'R' ? `voucher_${vv!.k} (received HTLC, S-offered)` : `voucher_${vv!.k} (offered HTLC)`;
 		}
 		return { index: idx, kind, amountSat: o.value, spk: hex(o.script) };
 	});
@@ -1071,7 +1126,8 @@ function buildView(
 		commitSig: signature,
 		vouchers: vouchersOnView,
 		keys,
-		wireSha256: sha256(Buffer.from(txHex, 'hex'))
+		wireSha256: sha256(Buffer.from(txHex, 'hex')),
+		absentNote
 	};
 }
 
@@ -1320,17 +1376,17 @@ w('commitment builder and signer, BOLT 4 onion construction and processing,');
 w('script helpers), not written by hand. All hex is lowercase; all signatures are');
 w('deterministic (RFC 6979, low-S), so this file regenerates byte-identically.');
 w();
-w('Five scenarios share one fixture (D.0). Each scenario is a complete transcript:');
+w('Six scenarios share one fixture (D.0). Each scenario is a complete transcript:');
 w();
-w('| Scenario | K | Funder | Amounts (msat) | `s_htlc_id_base` |');
-w('|---|---|---|---|---|');
+w('| Scenario | K | Funder | Amounts (msat) | `s_htlc_id_base` | R pre-round balance (msat) |');
+w('|---|---|---|---|---|---|');
 for (const r of results) {
 	const amt = r.K > 3 ? `${r.K} x ${r.sc.amounts[0]}` : r.sc.amounts.join(', ');
-	w(`| ${r.sc.id} | ${r.K} | \`${r.sc.funder}\` | ${amt} | ${r.sc.sHtlcIdBase} |`);
+	w(`| ${r.sc.id} | ${r.K} | \`${r.sc.funder}\` | ${amt} | ${r.sc.sHtlcIdBase} | ${r.sc.rPreMsat} |`);
 }
 w();
 w('Conventions used throughout, where the spec leaves the byte layout to the');
-w('implementer (each is also listed in D.7 for the spec author):');
+w('implementer (each is also listed in D.8 for the spec author):');
 w();
 w('- **Signed message body.** `body` in 7\'s `SHA256("ffor/msg" || type || body_excluding_the_signature)`');
 w('  is everything after the 2-byte type: `channel_id`, `epoch_id`, the fixed');
@@ -1364,8 +1420,8 @@ w(`| funding outpoint | \`${FUNDING_TXID_DISPLAY}:${FUNDING_OUTPUT_INDEX}\` (BOL
 w(`| funding txid (internal byte order) | \`${FUNDING_TXID_INTERNAL}\` |`);
 w(`| \`channel_id\` | \`${hex(CHANNEL_ID)}\` |`);
 w(`| funding amount | ${FUNDING_SAT} sat |`);
-w(`| pre-round balance \`S\` | ${S_BALANCE_MSAT_PRE} msat (every scenario) |`);
-w(`| pre-round balance \`R\` | ${R_BALANCE_MSAT_PRE} msat (every scenario) |`);
+w(`| pre-round balance \`S\` | ${S_BALANCE_MSAT_PRE} msat (D.1 to D.5); ${FUNDING_SAT * 1000n} msat (D.6) |`);
+w(`| pre-round balance \`R\` | ${R_BALANCE_MSAT_PRE} msat (D.1 to D.5); 0 msat (D.6) |`);
 w(`| \`dust_limit_satoshis\` (both sides) | ${DUST_LIMIT_SAT} |`);
 w(`| \`to_self_delay\` (both sides) | ${TO_SELF_DELAY} |`);
 w(`| \`channel_reserve_satoshis\` (both sides) | ${CHANNEL_RESERVE_SAT} |`);
@@ -1498,7 +1554,8 @@ function emitScenario(r: IScenarioResult): void {
 	w(`| \`s_htlc_id_base\` (\`ff_accept\` TLV 7) | ${sc.sHtlcIdBase} |`);
 	w(`| \`n0\` (\`ff_accept\`) | ${N0} |`);
 	w(`| commitment fee at the frozen rate, ${K} outputs (paid by \`${sc.funder}\`) | ${r.rView.commitFeeSat} sat (+ ${ANCHOR_TOTAL_SAT} sat anchors) |`);
-	w(`| \`S\` balance after the round | ${S_BALANCE_MSAT_PRE - r.budget} msat |`);
+	w(`| pre-round balance \`S\` / \`R\` | ${FUNDING_SAT * 1000n - sc.rPreMsat} / ${sc.rPreMsat} msat |`);
+	w(`| \`S\` balance after the round | ${FUNDING_SAT * 1000n - sc.rPreMsat - r.budget} msat |`);
 	w();
 	w('Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer\'s HTLC must deliver; they never appear on the channel):');
 	w();
@@ -1678,6 +1735,10 @@ function emitView(r: IScenarioResult, v: ICommitView, num: string): void {
 		w(`| ${row.index} | ${row.kind} | ${row.amountSat} | \`${row.spk}\` |`);
 	}
 	w();
+	if (v.absentNote) {
+		w(v.absentNote);
+		w();
+	}
 	if (ab) {
 		w(`Transaction hex omitted (${v.txHex.length / 2} bytes); it is reproduced by the generator and pinned by the txid and SHA256 above.`);
 		w();
@@ -1708,8 +1769,8 @@ function emitView(r: IScenarioResult, v: ICommitView, num: string): void {
 	}
 }
 
-// -- D.6 verification list -------------------------------------------------------
-w('## D.6 Verification performed by the generator');
+// -- D.7 verification list -------------------------------------------------------
+w('## D.7 Verification performed by the generator');
 w();
 w('Every line below is a hard assertion in the generator: it refuses to emit');
 w('this file if any fails. Scenario-tagged lines were checked in that scenario;');
@@ -1723,8 +1784,8 @@ w('verifier. Every commitment and second-level transaction was additionally');
 w('round-tripped through the transaction decoder.');
 w();
 
-// -- D.7 conventions and spec feedback ----------------------------------------------
-w('## D.7 Conventions adopted and spec feedback');
+// -- D.8 conventions and spec feedback ----------------------------------------------
+w('## D.8 Conventions adopted and spec feedback');
 w();
 w('Byte-level conventions these vectors follow. Each was an implementer\'s choice');
 w('in the first draft of v0.9 and is now normative text in the section named, so');
@@ -1749,7 +1810,7 @@ w('   display order most tools print; both are given for every commitment.');
 w('7. **Appendix A.** `D = 798,992 = T_exp - 1008` in both appendices; `D` enters');
 w('   no commitment, so Appendix A\'s transactions are unchanged.');
 w();
-w('## D.8 How to regenerate');
+w('## D.9 How to regenerate');
 w();
 w('```sh');
 w('cd <beignet repo>   # sibling of the specs repo, master branch');
