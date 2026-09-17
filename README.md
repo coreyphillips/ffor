@@ -1,103 +1,107 @@
 # FFOR: Fast-Forward Offline Receive
 
-A draft Lightning Network protocol extension for **non-custodial offline payments**:
-the payer's payment fully settles while the recipient is offline, and the recipient's
-funds are secured by channel mechanics rather than trust.
+A draft Lightning protocol extension for bounded, non-custodial offline receive:
+the payer's payment can finish while the recipient's wallet is offline, and the
+recipient later redeems an enforceable channel claim using the payment preimage.
+Recovery depends on returning before the claim deadline and obtaining that preimage
+from an available recovery source. The same-hash reuse limitation remains open.
 
-Before going offline, the recipient delegates bounded settlement authority to any
-direct channel peer. When a payment arrives, that peer settles it upstream instantly
-(the payer sees an ordinary completed payment) and simultaneously credits the recipient
-via a unilateral, strictly-recipient-favoring commitment update, made safe by the peer
-first revoking its own current state. The credit is a long-dated HTLC "voucher" the
-recipient claims on return, cooperatively or on-chain.
+The current reference implementation uses **Variant D**, the pre-signed voucher
+book. While online, the recipient `R` and its settlement peer `S` commit a finite
+set of fixed-amount HTLC vouchers in both channel commitment views. They activate
+the epoch with a signed, durable handshake. During the offline period, `S` settles
+eligible incoming payments upstream without sending per-payment channel updates to
+`R`. On return, `R` obtains the preimages and claims the paid vouchers cooperatively
+or on-chain. The older Variants A/B instead mint vouchers during the epoch through
+unilateral fast-forward updates.
 
-No consensus changes. No changes to payers or routing nodes. The settlement peer is a
-role, not a node class: any implementing peer with balance and uptime can serve.
+**D-R** adds receipt witnesses on the payment path. A witness normally stores an
+encrypted preimage record durably before propagating fulfilment, giving `R` another
+recovery source. Its barrier is bounded; deadline fallback can propagate first and
+later mark the record `unbarriered`. An optional BOLT 12 issuer answers new invoice
+requests while `R` is offline, using unconsumed slots from the same fixed-amount book.
+
+No Bitcoin consensus change is required. Ordinary compatible payers and ordinary
+routing nodes need no FFOR extension. The receiver, settlement peer, and any chosen
+receipt witnesses or issuer must implement their respective roles.
 
 ## Contents
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | The spec (draft v0.9.1): motivation, trust model, wire messages, voucher commitments, tower mediation, escapes, reconciliation, security analysis, and the server-free variant |
-| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: canonical `C_i^R` test vectors, computed and independently verified (byte-exact reconstruction, bitcoind-decoded), regenerated 2026-09-04 with the §7.6 amount model as input (commitments unchanged) and the A.5 fee arithmetic vectors |
-| [`tools/`](tools/) | Reproducible test-vector generator (runs against a beignet checkout) |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.3: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
+| [`IMPLEMENTATION.md`](IMPLEMENTATION.md) | Pinned reference revision, implementation/test matrix, verification scope and porting checklist |
+| [`ffor-variant-d-vectors.md`](ffor-variant-d-vectors.md) | Appendix D: Variant D setup transcript, both commitment views, activation hashes and claim paths |
+| [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: older fast-forward `C_i^R` commitments and amount/fee arithmetic; not a substitute for Appendix D |
+| [`tools/`](tools/) | Vector generators using a sibling Beignet checkout; regeneration instructions in `IMPLEMENTATION.md` |
 
 ## Reference implementation
 
-Prototyped in [beignet](https://github.com/coreyphillips/beignet) on the
-[`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor) branch. **M1
-through M7 are complete** and every on-chain gate is validated against live regtest
-bitcoind:
+The current source baseline is Beignet `master` at
+[`9ea018b6371c8b22366a133bc504679ac04b830e`](https://github.com/coreyphillips/beignet/tree/9ea018b6371c8b22366a133bc504679ac04b830e),
+inspected on 2026-09-17. It contains Variant D, the D-R witness service/client,
+BOLT 12 issuance, public APIs, and daemon configuration for the corresponding roles.
+[Implementation status and verification](IMPLEMENTATION.md) links each area to its
+source and tests and records which checks have actually been run.
 
-- **M1/M2**, epoch setup, variant-A settlement, reconciliation: a payer's payment
-  completes end-to-end while the recipient is offline; the spec's test vectors are
-  reproduced byte-exactly by the implementation.
-- **M3**, on-chain enforcement: recipient force-close with voucher sweeps, and the
-  revoked-state justice path.
-- **M4**, the Variant B tower: settlement is gated on tower-held preimages; the
-  recipient recovers all funds from the tower alone after the settlement peer vanishes.
-- **M5**, escapes: the full pre-signed escape lifecycle (broadcast, seed-only voucher
-  claim, timeout refund, stale-escape penalty); Appendix B's script and weight tables
-  confirmed exact on-chain.
-- **M6**, liquidity integration and chaos: bLIP-51 lease-then-epoch, advertised terms,
-  splice-on-return, and a 21-case crash matrix covering every protocol arrow.
-- **M7**, hardening the tower into a service: durable store and restart contract, a
-  swappable transport boundary, role separation and node-embedded breach-watch, and
-  gossip-based tower discovery. The spec's Appendix C BOLT-8 wire format was drafted
-  against that boundary but is not implemented.
+The older [`feat/ffor`](https://github.com/coreyphillips/beignet/tree/feat/ffor)
+prototype covers the A/B, tower and escape work described by M1-M7. It is historical
+context, not the implementation baseline for the current Variant D port. Appendix C's
+Variant B tower transport remains separately specified and unimplemented in the
+inspected baseline; Appendix F's implemented D-R witness transport is a different
+protocol.
 
-Plus **M8.8**, a two-test characterization of the §13.7 hash-reuse vector, which is
-implemented and green but gates nothing.
+The cross-implementation and mobile work is tracked in
+[ldk-node #117](https://github.com/synonymdev/ldk-node/issues/117). It targets offline
+receives in Bitkit Android and Bitkit iOS, with compatible Blocktank settlement
+support. That tracker is planned work, not evidence of existing LDK/LND interoperability.
 
-## Can it be trustless with no server at all?
+## Recovery assumptions and limits
 
-Mostly, and the spec now says exactly how far.
+- **Finite capacity and amounts.** Variant D precommits a bounded set of fixed-amount
+  vouchers and reserves channel liquidity. Single-part payments, negotiated HTLC
+  limits, dust rules and fees constrain what can be received. An issuer does not
+  make the book unlimited or support arbitrary amounts automatically.
+- **Bounded offline window.** `R` must retrieve evidence and reconcile or enforce
+  before the voucher expiry with enough claim margin. No indefinite recovery or
+  seed-only recovery guarantee is made.
+- **Chain watching.** A sufficiently long `to_self_delay` on `S`'s outputs can allow
+  `R` to punish a revoked broadcast after returning (§5.1). That delay is negotiated
+  at channel opening; existing channels must be checked against the intended window.
+  Otherwise the deployment needs suitable chain watching.
+- **Receipt availability.** Plain Variant D relies on an available source among
+  `S`, payers and any mailbox. D-R adds chosen witnesses. At least one usable source
+  must retain and return the needed preimage before the deadline. Witness receipts
+  do not prove unconditional availability.
+- **Hash reuse.** A malicious party holding a preimage can settle another payment
+  on the same hash without another receiver credit (§13.7). Honest duplicate checks
+  and single-use invoice distribution mitigate exposure but do not cryptographically
+  prevent it. BOLT 12 issuance alone does not close it.
 
-The tower was doing two jobs. **Watching** for a revoked broadcast is removable outright:
-open the channel with a `to_self_delay` on `S` longer than the offline window, and `S`'s
-only revocable state is locked behind a CSV that outlives `R`'s absence, so `R` penalizes
-on return with nobody watching (§5.1). **Mediating** the settlement is removable too, via
-**Variant D** (§9.5): commit the whole voucher book at setup in one ordinary channel
-update, and `S` sends no message to anyone for the entire epoch. Payments settle by
-preimage revelation alone, and because BOLT 2 forces `S` to publish that preimage upstream
-to take the money, the payer necessarily ends up holding the key to `R`'s voucher. `R`'s
-recourse becomes a 1-of-N availability assumption over `{S, the payers, any mailbox}`
-rather than trust in one chosen agent.
+The deferred terminal one-shot recovery proposal is tracked in
+[FFOR #32](https://github.com/coreyphillips/ffor/issues/32). The separate Variant B
+tower provisioning authentication issue remains tracked in
+[FFOR #18](https://github.com/coreyphillips/ffor/issues/18).
 
-What is **not** removable is the last increment: an `S` that settles and withholds, whose
-payer is also unreachable, still costs `R` that voucher. §12.5 proves this is a bound
-rather than a gap. Fair exchange without a trusted third party is impossible, `R` is
-offline by construction so its half of the swap must be pre-played, and pre-playing it
-moves the exposure onto `S` instead of eliminating it. Script cannot force a message to be
-sent, cannot prove a negative, and cannot force `S` on-chain; covenants and taproot do not
-change any of that.
+## Specification status
 
-## Status
+**Draft v0.9.3.** The signed activation/abort/close lifecycle arrived in v0.9;
+v0.9.1 added D-R witnesses and issuer provisions; v0.9.2 clarified implementation
+errata including witness encryption; v0.9.3 added authenticated witness-fetch paging.
+See §17 for the exact compatibility history.
 
-Draft v0.9.1. v0.9.1 adds the D-R receipt-witness profile (§9.6, Appendix F: store the encrypted preimage record before propagating the fulfil, per-epoch keys, bounded barrier, the claim and its limits stated in full). v0.9 specifies the signed lifecycle (§7.5: `ff_activate` /
-`ff_activate_ack` over a chained transcript hash, `ff_abort`, `ff_close` /
-`ff_close_ack`; `ff_begin` and `ff_end` are retired) and Variant D's one legal BOLT 2
-sequence (§9.5.1: vouchers committed in both views before `stfu`, activation under
-quiescence as an FFOR transition, a durable `ACTIVE` freeze that outlives quiescence),
-resolving issues #22 and #23. v0.8.2 adds the amount model (§7.6): one formula for the invoice
-amount, the voucher amount and the amount `S` expects upstream, with `S`'s fee as the
-ordinary last-hop forwarding fee and every `(H_k, d_k)` pair bound into the signed
-setup transcript (issue #21). v0.8.1 was an errata release over v0.8. Wire details
-reflect what the prototype actually implements; message type and feature bit numbers
-are provisional pending bLIP assignment. **Variant D and §5.1 are specified but not
-yet prototyped** (M8, §15.2).
-
-§17 lists what changed and what it breaks. The one item that reached published
-artefacts: §8's millisatoshi rounding rule was the inverse of BOLT 3's, so `C_2` and
-`C_3` in the test vectors carried a `to_remote` one satoshi high. The reference
-implementation and the vectors have both been corrected.
+The 2026-09-17 documentation refresh aligns the reference/status descriptions with
+Beignet and the existing normative rules. It does not allocate new wire identifiers
+or change the protocol version. Feature bits and message numbers remain provisional
+pending bLIP assignment. Existing implementation and tests are not a substitute for
+independent review or cross-implementation qualification.
 
 ## Prior art
 
 ZmnSCPxj's fast forwards, Lloyd Fournier's offline-receive observation, and the async
-payments track (BOLT 12 static invoices / trampoline hold). See §2 and §16 of the spec
-for how FFOR differs: it is the only point in the design space where the payer-side
-payment completes while the recipient is offline.
+payments track provide the background. See §2 and §16 for references and differences,
+including the distinction between holding a payment until the recipient returns and
+completing the payer's payment during the recipient's absence.
 
 ## License
 
