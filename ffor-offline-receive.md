@@ -1,14 +1,16 @@
 # FFOR: Fast-Forward Offline Receive
 
-**Non-custodial offline Lightning payments via delegated settlement and unilateral pre-revoked state handoff**
+**Non-custodial offline Lightning payments via delegated settlement and enforceable channel vouchers**
 
-- Status: Draft v0.9.3 (2026-09-05), hardened by computed test vectors (Appendix A) and
-  a **complete M1-M7 prototype** (beignet `feat/ffor`: on-chain enforcement, the
-  Variant B tower and its durable store, the full escape lifecycle, bLIP-51 lease
-  integration, and a 21-case crash matrix, all gates bitcoind-validated; Appendix B's
-  script and weight tables confirmed exact on regtest); wire details below reflect what
-  the prototype actually implements, with Appendix C the one exception (see its status
-  note)
+- Status: Draft v0.9.3 (2026-09-05). Reference/status documentation refreshed
+  2026-09-17 without a wire-version change. The current Beignet baseline implements
+  Variant D, D-R receipt witnesses and the BOLT 12 issuer. See
+  [IMPLEMENTATION.md](IMPLEMENTATION.md) for the pinned revision, source/test mapping,
+  executed checks and outstanding qualification work.
+- Appendices A and D contain computed vectors for different constructions. M1-M7
+  describe the historical A/B prototype on `feat/ffor`; M8/M9 cover the current D/D-R
+  implementation. Appendix C's Variant B tower transport remains separately
+  unimplemented; it is not Appendix F's implemented witness transport.
 - **v0.8.1 is an errata release.** It corrects §8's millisatoshi rounding rule to
   BOLT 3's (the previous rule made byte-exact reconstruction fail by one satoshi;
   Appendix A has been regenerated), forbids the §7.2 `H_1` binding in Variant D
@@ -51,13 +53,15 @@
   reveal nothing about the book (issue #25). See §17.4.
 - **New in v0.8: FFOR without a server.** §5.1 removes the *watching* role with a single
   channel-open parameter. §9.5 (**Variant D**) removes the *mediating* role by
-  pre-signing the entire voucher book at setup, so `S` sends no message to anyone for the
-  whole epoch and `R`'s on-chain claim needs only a preimage, which the payer necessarily
-  holds. §12.5 states the bound the two cannot cross, and why no script, covenant or
+  pre-signing the entire voucher book at setup, so `S` sends no per-payment epoch
+  message to `R` or a settlement mediator; ordinary upstream fulfilment still occurs.
+  With its setup-time claim material, `R` needs the preimage, which the payer holds. §12.5 states the bound the two cannot cross, and why no script, covenant or
   taproot construction crosses it either. §13.7 records an invoice-reuse theft vector that
   **no** variant currently closes, confirmed against the reference implementation.
-  §5.1's `to_self_delay` direction is confirmed against BOLT 2. Variant D itself is
-  unprototyped (M8, §15.2)
+  §5.1's `to_self_delay` direction is confirmed against BOLT 2. Variant D and its
+  watchtower-free penalty path have implementation and test coverage in the current
+  reference baseline (M8, §15.2); execution evidence is recorded separately in
+  [IMPLEMENTATION.md](IMPLEMENTATION.md).
 - Author: Corey Phillips
 - Target: standalone extension bLIP; prototype target beignet ↔ beignet
 - License: MIT
@@ -69,24 +73,29 @@
 FFOR lets a Lightning node (the **recipient**, `R`) receive payments that *fully settle
 for the payer* while `R` is offline, without giving custody of the funds to anyone.
 
-Before going offline, `R` delegates a bounded settlement authority to one of its direct
-channel peers (the **settlement peer**, `S`). When a payment arrives, `S` settles it
-upstream immediately (the payer's HTLC clears end-to-end within seconds, exactly like an
-online payment) and *simultaneously* credits `R` inside their shared channel by issuing
-a **fast-forward update**: a unilateral, strictly-recipient-favoring commitment update
-that `S` signs alone, made safe by `S` first revoking its own current commitment. The
-credit takes the form of a **voucher**: a long-dated HTLC output on `R`'s commitment
-transaction, claimable by `R` on return (cooperatively via `update_fulfill_htlc`, or
-unilaterally on-chain with pre-signed HTLC-success transactions), and reverting to `S` at
-a distant expiry if `R` never returns.
+Before going offline, `R` delegates bounded settlement authority to a direct channel
+peer (the **settlement peer**, `S`). The receiver's credit is an enforceable long-dated
+HTLC **voucher**, redeemable with its preimage on return, cooperatively or on-chain.
+Unclaimed vouchers revert to `S` under their expiry conditions.
+
+Variants A and B mint vouchers during the epoch using unilateral fast-forward
+commitment updates and pre-revocation. Variant D (§9.5), used by the current reference
+implementation, commits the entire fixed-amount voucher book in both commitment views
+before activation. `S` then settles matching payments upstream by revealing the
+preimages without a per-payment channel update to the offline `R`. D-R (§9.6) adds
+receipt witnesses, and §9.7 adds an issuer for new invoice requests while `R` is offline.
+
+Recovery remains conditional on the appropriate evidence reaching `R` before the
+claim deadline. Section 13.7 describes the same-hash reuse limitation shared by these
+HTLC constructions.
 
 `S` is a *role*, not a special node class: any peer that implements this spec, holds
 sufficient local balance in the shared channel (i.e. `R`'s inbound liquidity), and stays
 online can serve. An "LSP" is just the economically obvious candidate.
 
-The protocol requires no consensus changes and no changes to nodes other than `R`, `S`,
-and (optionally) `R`'s tower. Payers, routing nodes, and the rest of the network see a
-perfectly ordinary payment.
+The protocol requires no consensus changes. Ordinary compatible payers and routing
+nodes see a normal payment and need no FFOR extension. `R`, `S`, and any selected tower,
+receipt witness or issuer must implement the respective role.
 
 ---
 
@@ -1250,7 +1259,8 @@ force it. Variant D removes the problem instead of mediating it, by committing t
 voucher set **at setup**, in one ordinary channel update, and settling payments purely by
 preimage revelation.
 
-**`S` sends nothing to anyone during the epoch.** There is no settlement package, no
+**`S` sends no per-payment epoch message to `R` or a mediator.** Normal upstream
+fulfilment still occurs. There is no settlement package, no
 `seq`, no unilateral fast-forward update, no pre-revocation, no tower call, and no
 channel message to `R`.
 
@@ -1585,7 +1595,8 @@ witness it relies on has acknowledged (§7.5.5).
   guard: it stops a conforming payer's mistaken route from settling without a record,
   and it does nothing against an `S` that wants to settle anyway.
 - `S` is otherwise unchanged from §9.5.1: one-shot slot state, `ff_close_ack` with
-  bitmap and preimages, no message to anyone during the epoch. `S` MAY be told nothing
+  bitmap and preimages, and no per-payment epoch message to `R` or a mediator.
+  Normal upstream fulfilment still occurs. `S` MAY be told nothing
   about the witnesses beyond TLV 13.
 - Witness hops charge ordinary forwarding fees, folded into the blinded path's
   aggregate `blinded_payinfo` per §7.6. None of them changes `d_k`.
@@ -2354,8 +2365,9 @@ either, whose voucher book has exactly one output per hash. It is the one theft 
 this spec that no variant's cryptography addresses, and unlike Variant A's withholding it
 is **not bounded by the epoch budget**: it is bounded only by what payers actually send.
 
-Characterized against the reference implementation (beignet `feat/ffor`) in a two-test
-gate (M8.8, §15.2), which sharpened the finding. An **honest** `S` *does* refuse the
+Originally characterized against the historical Variant B prototype (beignet
+`feat/ffor`), and now also covered by the current Variant D and witness reuse suites
+listed in [IMPLEMENTATION.md](IMPLEMENTATION.md) (M8.8 and M9.4). An **honest** `S` *does* refuse the
 duplicate: on a second payment for a consumed hash it fails upstream with
 `duplicate delegated payment for consumed hash H_k`. Single-use is implemented. But that
 refusal is **self-imposed by `S` and unverifiable by anyone else**. The tower's gate is
@@ -2536,9 +2548,14 @@ transport and the payment mailbox object, below.
 
 ---
 
-## 15. Prototype plan (beignet ↔ beignet)
+## 15. Implementation milestones (beignet ↔ beignet)
 
-Everything below reuses existing beignet machinery: quiescence (splicing), hold
+[IMPLEMENTATION.md](IMPLEMENTATION.md) records the current source/test mapping and
+verification scope. M1-M7 below are historical A/B milestones; M8/M9 have implementation
+and test coverage in the pinned current Beignet baseline. The gate descriptions remain
+acceptance criteria, not a claim that every gate was executed in the latest review.
+
+The historical prototype reused existing beignet machinery: quiescence (splicing), hold
 invoices + wake (M2 async payments), commitment building, pre-signed HTLC-success
 handling, shachain stores, liquidity ads (M3), and the regtest/bitcoind harness.
 
@@ -2597,10 +2614,12 @@ still needs writing up here.
 
 ### 15.2 M8: Variant D and watchtower-free operation
 
-M8 validates that the tower can be removed on both axes (§5.1 for watching, §9.5 for
-mediating). It should be cheaper than any prior milestone, because Variant D deletes
-machinery rather than adding it: no packages, no escapes, no unilateral updates, no tower
-transport.
+M8 covers removal of the tower on both axes (§5.1 for watching, §9.5 for mediating).
+Variant D is implemented in the pinned current Beignet baseline. It uses the signed
+lifecycle and ordinary voucher commitment rounds, without A/B settlement packages,
+escapes, unilateral commitment advancement or tower transport. The matrix in
+[IMPLEMENTATION.md](IMPLEMENTATION.md) distinguishes non-chain coverage from regtest
+gates and their execution status.
 
 1. **M8.0: Watchtower-free penalty (§5.1).** Open a channel with
    `to_self_delay_S > (T_exp − epoch_start) + margin`. Run any variant's epoch, have `S`
@@ -2617,8 +2636,10 @@ transport.
    with `K` HTLC outputs at `T_exp` in **both** views; byte-exact against a BOLT 3
    reference; every second-stage signature verifies; both sides compute the same
    `T_init`, `T_setup`, `H_book`, `H_commit` and `H_act` (Appendix D vectors); `ACTIVE`
-   survives a disconnect and a restart on each side, and a disconnect before the ack
-   aborts with the vouchers failed.
+   survives a disconnect and a restart on each side. Pre-activation disconnects
+   unwind the vouchers except for §7.5.5's acknowledgement-loss window: an
+   `ACTIVATING` R preserves its record while S reestablishes `ACTIVE` with matching
+   `H_act` and retransmits the acknowledgement.
 3. **M8.2: Silent settlement.** Payer pays voucher `k`'s pre-signed invoice while `R` is
    offline. **Gate:** payer sees SUCCESS; `S` sends **zero** messages to `R` and zero to
    any tower for the whole epoch (assert on the wire log, not just on balances).
@@ -2639,12 +2660,12 @@ transport.
 7. **M8.6: `R` cannot fabricate credit.** Adversarial `R` attempts to claim a voucher
    whose payment never arrived. **Gate:** claim is unconstructable (no preimage); and the
    inverse test, an `S` that leaks `t_k` to a mailbox *before* the upstream HTLC is
-   irrevocably fulfilled, MUST be caught by the §9.5.2 ordering assertion.
+   irrevocably committed, MUST be caught by the §9.5.2 ordering assertion.
 8. **M8.7: Vanished `R`.** No reconciliation; `S` force-closes after `T_exp` and sweeps
    every unclaimed voucher via HTLC-timeout. **Gate:** `S` whole (no escape machinery
    present in the build); `R`'s `to_remote` claimable whenever it returns.
-9. **M8.8: Hash reuse (§13.7), characterization.** Two tests, both **passing today**, that
-   pin the open problem rather than gate against it. (a) An honest `S` refuses a second
+9. **M8.8: Hash reuse (§13.7), characterization.** Tests pin the open problem
+   rather than establish its prevention. (a) An honest `S` refuses a second
    payment on a consumed hash (`duplicate delegated payment for consumed hash`), proving
    single-use *is* implemented. (b) A malicious `S` (same node identity, its own duplicate
    guard omitted) claims a second payer on `H_k` with the token alone: the payment
@@ -2652,16 +2673,20 @@ transport.
    and after, proving the theft is currently possible and evidence-free. Test (b) is
    written to **invert** (start failing) the day BOLT 12 / PTLC payer-and-amount binding
    (§13.5) makes the second settlement unconstructable, giving that future work a
-   regression target. Unlike M8.0 to M8.7 this milestone is **not blocked on Variant D**:
-   it characterizes the existing Variant B implementation and is already implemented
-   (`tests/lightning/ffor-hash-reuse.test.ts`, in-memory, no bitcoind, green as of this
-   writing).
+   regression target. The original Variant B test remains historical context. The
+   current baseline covers Variant D in `tests/lightning/ffor-variant-d-hash-reuse.test.ts`
+   and witness reuse in `tests/lightning/ffor-witness-reuse.test.ts`. Passing these
+   characterization tests means the documented attack is reproduced, not prevented.
 
 ---
 
 ### 15.3 M9: D-R receipt witnesses
 
-Builds on M8 (plain Variant D on master). Each gate is judged by what `R` can enforce.
+Builds on M8. The pinned current Beignet baseline implements the witness and issuer
+modules and has suites for these milestones, including authenticated fetch paging.
+See [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and verification limits. Each
+gate is judged by what `R` can enforce; a test file or closed issue alone does not
+establish a live regtest or stock-payer interoperability result.
 
 1. **M9.0: Witness module and manifest.** `ff_witness_provision` / `ff_witness_ack`
    over BOLT 8; manifest verification; capacity reservation; durable manifest store
@@ -3007,11 +3032,13 @@ release and fetch, are carried as request/response pairs of custom, odd (ignorab
 peer messages. Numbers are provisional pending bLIP assignment; all multi-byte integers
 are big-endian.
 
-**Implementation status (2026-07-26): this appendix is specified but not prototyped.**
-Unlike the rest of this document, it does not describe what the reference
-implementation does. beignet reaches `T` through an abstract three-method client
+**Implementation status (reviewed 2026-09-17): this Variant B appendix remains
+specified but unimplemented in the inspected current baseline.** The historical
+`feat/ffor` prototype reaches `T` through an abstract three-method client
 (provision / release / fetch) with an in-process loopback for tests and a TCP
-JSON-lines transport in its tower example; message types 55031 to 55041 exist nowhere.
+JSON-lines transport in its tower example. The current Variant D implementation
+uses Appendix F for D-R witnesses; that does not implement the Variant B message
+types 55031 to 55041 in this appendix.
 Read this appendix as the interop target for a third-party tower, not as a description
 of running code, and see §11.3's tower discovery, which presupposes it. Two
 consequences follow, and neither is theoretical while the appendix is unbuilt:
