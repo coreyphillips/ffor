@@ -21,6 +21,14 @@ recovery source. Its barrier is bounded; deadline fallback can propagate first a
 later mark the record `unbarriered`. An optional BOLT 12 issuer answers new invoice
 requests while `R` is offline, using unconsumed slots from the same fixed-amount book.
 
+**Receiving without entering an amount:** draft v0.9.5 defines a payer-chosen
+receive interface using an amountless BOLT 12 offer. The payer chooses a positive
+amount and gets a fixed invoice only if an exact matching voucher is available.
+Blank or zero can be a wallet input for this mode; no zero-valued invoice or voucher
+is created. This does not support arbitrary-amount BOLT 11 offline invoices.
+[Scope and integration plan](AMOUNTLESS-RECEIVE.md) describes the existing issuer
+support, remaining implementation work and per-app estimates.
+
 No Bitcoin consensus change is required. Ordinary compatible payers and ordinary
 routing nodes need no FFOR extension. The receiver, settlement peer, and any chosen
 receipt witnesses or issuer must implement their respective roles.
@@ -29,7 +37,8 @@ receipt witnesses or issuer must implement their respective roles.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.4: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.5: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
+| [`AMOUNTLESS-RECEIVE.md`](AMOUNTLESS-RECEIVE.md) | Payer-chosen request design, downstream implementation scope and effort estimates |
 | [`IMPLEMENTATION.md`](IMPLEMENTATION.md) | Pinned reference revision, implementation/test matrix, verification scope and porting checklist |
 | [`ffor-variant-d-vectors.md`](ffor-variant-d-vectors.md) | Appendix D: Variant D setup transcript, both commitment views, activation hashes and claim paths |
 | [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: older fast-forward `C_i^R` commitments and amount/fee arithmetic; not a substitute for Appendix D |
@@ -85,13 +94,16 @@ tower provisioning authentication issue remains tracked in
 
 ## Specification status
 
-**Draft v0.9.4.** The signed activation/abort/close lifecycle arrived in v0.9;
+**Draft v0.9.5.** The signed activation/abort/close lifecycle arrived in v0.9;
 v0.9.1 added D-R witnesses and issuer provisions; v0.9.2 clarified implementation
 errata including witness encryption; v0.9.3 added authenticated witness-fetch paging.
 v0.9.4 changes public plaintext Variant D fee acceptance without changing wire
 formats. A v0.9.3 settlement peer can reject the lower public fee accepted by
-v0.9.4; deployments must confirm support or cover the book fee. See §17 for the exact
-compatibility history.
+v0.9.4; deployments must confirm support or cover the book fee. v0.9.5 specifies the
+optional payer-chosen request interface and tightens issuer reservation/retry rules,
+including fresh BOLT 12 responses for path-terminal issuers. Existing wire formats
+and voucher amounts stay unchanged. The pinned implementation is not yet qualified
+against these new rules. See §17 for the exact compatibility history.
 
 The 2026-09-17 documentation refresh aligns the reference/status descriptions with
 Beignet and the existing normative rules. It does not allocate new wire identifiers
