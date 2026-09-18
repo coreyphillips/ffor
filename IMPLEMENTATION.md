@@ -23,6 +23,36 @@ closed issue, or test filename is not a verified interoperability result. Differ
 must be classified as implementation bugs, specification ambiguities, extensions or
 missing coverage before a port adopts them.
 
+## Public-channel fee clarification, 2026-09-18
+
+This addendum refers to Beignet
+[`0ab01714a1c685afef958a3452426d2eba300ac0`](https://github.com/coreyphillips/beignet/commit/0ab01714a1c685afef958a3452426d2eba300ac0),
+merged in [Beignet #897](https://github.com/coreyphillips/beignet/pull/897). It is later
+than the pinned verification baseline below and does not extend that baseline's
+recorded test results.
+
+Sections 7.6, 9.5.1 and 11.3 now describe Variant D's public-channel fee acceptance.
+A qualifying plaintext payment can cover either the book fee or S's current public
+policy on the channel named by the onion. The lower complete fee is sufficient;
+R's voucher amount is unchanged. Private or otherwise unqualified hops and blinded
+paths retain the book fee. This is a settlement-policy change from the prior draft's
+unconditional book minimum, with no change to the signed book fields, invoice amount,
+voucher construction or existing book-priced arithmetic vectors.
+
+Operators cannot rely on a higher FFOR book fee as a guaranteed premium over a lower
+public forwarding policy. A zero-fee parallel public S-R channel can make settlement
+free. Matching policies at setup is insufficient if policies later change or another
+public S-R channel is selected.
+
+Restart durability of public-channel eligibility remains an open qualification item
+in [Beignet #899](https://github.com/coreyphillips/beignet/issues/899). The locally
+published announcement path does not directly persist its graph row, and deferred
+verification can affect eligibility after recovery. The required regression test
+restarts S while R stays offline and pays before gossip resynchronizes. The existing
+fee-failure path also does not attach the named public channel's update, so the payer
+does not learn a revised policy from that failure. Neither behavior is established
+as fixed by this documentation change.
+
 ## Current implementation map
 
 All Beignet paths below refer to the pinned revision. The executable checks described

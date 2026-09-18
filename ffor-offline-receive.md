@@ -475,9 +475,11 @@ variant: `S` MUST NOT settle the same hash twice.
 
 **Amount, by profile (§7.6).** In the fixed-amount profile (always in Variant D,
 optional in A and B) each invoice is for **exactly `d_k`**, the amount `ff_init` TLV 9
-names for its hash. The invoice does not include `S`'s fee: the payer adds `fee_S(d_k)`
-when it builds the route, exactly as for any last hop, because the route hint carries
-`S`'s fee terms. `R` MUST NOT sign an invoice for `H_k` at any amount other than `d_k`,
+names for its hash. The invoice does not include `S`'s fee: the payer adds the last-hop
+fee when it builds the route. The hint carries `fee_S(d_k)` from the book; a payer
+that knows a public channel can instead price that hop from its `channel_update`.
+Variant D accepts either fee under the conditions in §7.6. `R` MUST NOT sign an
+invoice for `H_k` at any amount other than `d_k`,
 and `S` MUST settle only a payment whose `amt_to_forward` equals `d_k`. In the
 amountless profile (Variants A and B only) invoices carry no amount, the payer supplies
 one, and the voucher pays whatever `S`'s hop payload says to forward, an amount only
@@ -814,9 +816,9 @@ two of them. They are defined here once and used by these names everywhere else.
 | Symbol | Meaning | Who fixes it |
 |---|---|---|
 | `d_k` | the **payee amount**: what `R` is owed for hash `H_k`. The invoice amount and the voucher amount | `R`, in `ff_init` TLV 9 (fixed-amount profile); the payer, in the amountless profile |
-| `fee_S(d_k)` | `S`'s **forwarding fee** for the `S`→`R` hop | the `ff_init` fee fields, signed by both sides |
-| `gross_into_S(d_k)` | what the payer's HTLC must deliver to `S`: `d_k + fee_S(d_k)` | derived |
-| `upstream_route_amount` | what the payer sends from its own node: `gross_into_S` plus the fees of every hop before `S` | the payer; invisible to this protocol |
+| `fee_S(d_k)` | `S`'s **book forwarding fee** for the `S`→`R` hop | the `ff_init` fee fields, signed by both sides |
+| `gross_into_S(d_k)` | the book-priced amount into `S`: `d_k + fee_S(d_k)`; the public-channel exception below can admit less | derived |
+| `upstream_route_amount` | what the payer sends from its own node: the actual amount into `S` plus the fees of every hop before `S` | the payer; invisible to this protocol |
 
 ```
 fee_S(a)         = fee_base_msat + floor(a * fee_proportional_millionths / 1000000)
@@ -825,12 +827,49 @@ gross_into_S(a)  = a + fee_S(a)
 
 `fee_S` is BOLT 7's forwarding fee formula with integer division, evaluated on the
 **payee amount**, never on the incoming HTLC amount. `S`'s compensation is therefore the
-ordinary fee of the last hop, published to the payer in the invoice's route hint
-(BOLT 11 `r` field) or in the blinded path's `payment_relay` (BOLT 4), and the payer
-adds it when it builds the route exactly as it would for any last hop. Nothing is
+ordinary fee of the last hop. The book terms are published in the invoice's route hint
+(BOLT 11 `r` field) or in the blinded path's `payment_relay` (BOLT 4). A plaintext
+payer can instead use the public channel's advertised policy as described below.
+The payer adds the selected fee when it builds the route. Nothing is
 deducted from the voucher. This is the only fee `S` earns per payment: an
 implementation MUST NOT also skim the voucher, and MUST NOT charge the fee twice by
 placing it both in the route hint and in the invoice amount.
+
+**Public-channel fee acceptance (Variant D only).** A BOLT 11 route hint is advisory.
+If the payer already knows a public `S`→`R` channel, it can price that hop from
+`S`'s `channel_update`, including when it selects a parallel channel rather than the
+epoch channel. For a plaintext Variant D payment, `S` MUST accept a fee covering
+either the book terms or its current advertised forwarding policy on the qualifying
+channel named by the onion's `short_channel_id`. Other settlement checks still apply.
+
+A qualifying channel MUST be a local public channel from `S` to this book's `R`.
+Its SCID MUST match the payload. Its `channel_announcement` MUST have all four
+signatures verified, name `S` and `R`, and bind each node to that channel's funding
+key in the corresponding position. A sent or received `announcement_signatures`
+flag, an unverified announcement, or a match on only one funding key is insufficient.
+An alias or SCID that does not identify such a channel does not qualify. `R` being
+offline, and the epoch channel being frozen for ordinary forwarding, do not by
+themselves remove eligibility.
+
+Let `fee_public_S(a, c)` be BOLT 7's fee formula using `S`'s current advertised policy
+for qualifying channel `c`, including any applicable lease fee caps. Define:
+
+```
+fee_required_S(a) = min(fee_S(a), fee_public_S(a, c))  // qualifying plaintext Variant D hop
+                 = fee_S(a)                         // all other cases
+```
+
+Compute both complete fees on the payee amount before taking the minimum. Do not
+mix the base fee from one policy with the proportional rate from the other. Blinded
+paths always use the book terms, as do plaintext payments without a qualifying
+public channel. The exception does not alter Variants A or B or the blinded inverse
+formula. `S` still honours the book fee when its public policy increases above it.
+
+The book fee is therefore not a guaranteed minimum compensation for `S` on public
+plaintext Variant D routes. A qualifying zero-fee parallel channel permits zero-fee
+settlement. `R` still receives exactly `d_k`; only `S`'s compensation changes.
+Matching the two policies at setup alone does not preserve equality if a policy
+changes later or the payer selects another public channel.
 
 **What `S` reads.** `S` decrypts its own onion hop payload as any forwarding node does,
 and never needs the final hop payload, which is encrypted to `R` (§7.3). How it learns
@@ -864,17 +903,19 @@ settling a delegated payment on `H_k`, `S` MUST verify, in addition to §8:
    above what it expected; `S` exercises that choice on `R`'s behalf for the one
    amount `R` signed for, and a conforming payer paying a fixed-amount invoice never
    triggers it. Surplus inside the slack is fee rounding and belongs to `S`.
-2. `amount_msat − amt_to_forward ≥ fee_S(d_k)`. Any excess over `fee_S(d_k)` is fee
-   overpayment the payer chose and belongs to `S`, exactly as for any forwarding
-   node. It is never `R`'s credit and no message represents it as such. Under a
+2. `amount_msat − amt_to_forward ≥ fee_required_S(d_k)`. Any excess over the required
+   fee is fee overpayment the payer chose and belongs to `S`, exactly as for any
+   forwarding node. It is never `R`'s credit and no message represents it as such. Under a
    blinded path a conforming payer satisfies this by construction of the inverse
    formula.
 
 Failure encoding follows BOLT 4 for the hop type. Under a plaintext route hint `S`
 fails as the erring forwarding node (§8): `temporary_node_failure` for check 1,
-`fee_insufficient` reporting the `ff_init` fee terms as the outgoing channel's setting
-for check 2. Under a blinded path `S` MUST return `invalid_onion_blinding` for every
-failure, as BOLT 4 requires of a blinded hop, and MUST NOT leak which check failed.
+`fee_insufficient` for check 2. An accompanying `channel_update` for a qualifying
+public channel MUST report that channel's actual advertised policy, not replace it
+with the book terms. Under a blinded path `S` MUST return `invalid_onion_blinding`
+for every failure, as BOLT 4 requires of a blinded hop, and MUST NOT leak which check
+failed.
 
 The voucher then pays `v_k = d_k`. `R` MUST NOT sign an invoice for `H_k` at any amount
 other than `d_k`. `T` (§9.4) MUST verify `voucher_amount_msat == d_k` against the
@@ -1357,8 +1398,8 @@ the epoch anyway (§3), the opportunity cost is close to what `S` already accept
 **Settlement.** On `update_add_htlc` with `payment_hash = H_k`, once the upstream HTLC is
 irrevocably committed, `S` is `ACTIVE`, no stopping condition of §7.5.6 holds, and the
 §8 checks pass (the §7.6 amount checks, `amt_to_forward == d_k` within the blinded-path
-slack and `amount_msat − d_k ≥ fee_S(d_k)`; upstream CLTV margin; and `H_k` not already
-settled), `S` marks slot `k` settled durably and fulfils upstream with `t_k`. That is the
+slack and fee check 2 using `fee_required_S(d_k)`; upstream CLTV margin; and `H_k` not
+already settled), `S` marks slot `k` settled durably and fulfils upstream with `t_k`. That is the
 entire settlement procedure. `S` MUST keep per-slot state `UNUSED → SETTLING → SETTLED`
 durable across restart: a slot in `SETTLING` after a crash is resolved by the upstream
 channel's own reestablish (the fulfil either went out or it did not), never by settling
@@ -2125,10 +2166,12 @@ reason, never a reason of its own inferred from the `ff_error`; during `ACTIVE` 
   `{ff_fee_base_msat: u32, ff_fee_ppm: u32, max_budget_msat: u64, max_epoch_blocks:
   u16, variants: u8 bitfield}`, letting `R` price uptime+delegation the same way it
   prices inbound capacity today. The two fee fields are the forwarding fee `S`
-  charges for the `S`→`R` hop on delegated payments (§7.6); they need not equal the
-  channel's `channel_update` fees, since the route hint `R` signs carries the FFOR
-  terms and a payer uses the hint, not gossip, for a private last hop. "Echoing the
-  terms" in `ff_init` means: fee fields
+  puts in the book for the `S`→`R` hop on delegated payments (§7.6); they need not
+  equal the channel's `channel_update` fees. A private last hop uses the hint's FFOR
+  terms, while a public plaintext Variant D route may pay the lower fee of the
+  qualifying channel the payer selects. Operators MUST NOT treat the advertised FFOR
+  terms as a guaranteed per-payment fee floor on those public routes. Blinded paths
+  retain the book fee. "Echoing the terms" in `ff_init` means: fee fields
   **≥ advertised** (overpaying is acceptable), `budget_msat ≤ max_budget_msat`, epoch
   length ≤ `max_epoch_blocks`, and a variant whose bit is set; `S` rejects an
   out-of-terms `ff_init` with `ff_error`.
