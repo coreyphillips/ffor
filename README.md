@@ -29,7 +29,7 @@ receipt witnesses or issuer must implement their respective roles.
 
 | File | What it is |
 |---|---|
-| [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.3: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
+| [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.4: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
 | [`IMPLEMENTATION.md`](IMPLEMENTATION.md) | Pinned reference revision, implementation/test matrix, verification scope and porting checklist |
 | [`ffor-variant-d-vectors.md`](ffor-variant-d-vectors.md) | Appendix D: Variant D setup transcript, both commitment views, activation hashes and claim paths |
 | [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: older fast-forward `C_i^R` commitments and amount/fee arithmetic; not a substitute for Appendix D |
@@ -85,10 +85,13 @@ tower provisioning authentication issue remains tracked in
 
 ## Specification status
 
-**Draft v0.9.3.** The signed activation/abort/close lifecycle arrived in v0.9;
+**Draft v0.9.4.** The signed activation/abort/close lifecycle arrived in v0.9;
 v0.9.1 added D-R witnesses and issuer provisions; v0.9.2 clarified implementation
 errata including witness encryption; v0.9.3 added authenticated witness-fetch paging.
-See §17 for the exact compatibility history.
+v0.9.4 changes public plaintext Variant D fee acceptance without changing wire
+formats. A v0.9.3 settlement peer can reject the lower public fee accepted by
+v0.9.4; deployments must confirm support or cover the book fee. See §17 for the exact
+compatibility history.
 
 The 2026-09-17 documentation refresh aligns the reference/status descriptions with
 Beignet and the existing normative rules. It does not allocate new wire identifiers

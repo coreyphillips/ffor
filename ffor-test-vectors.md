@@ -109,7 +109,9 @@ R's point for commitment number 42 (the pre-epoch state).
 
 ## A.2 Delegated payments and voucher values
 
-FFOR 7.6, fixed-amount profile. The inputs are the payee amounts `d_k`
+FFOR 7.6, fixed-amount A/B profile. These vectors use the book fee;
+the public plaintext Variant D exception in 7.6 does not apply here.
+The inputs are the payee amounts `d_k`
 (`ff_init` TLV 9); the voucher pays exactly `v_k = d_k`, and the incoming
 HTLC must deliver `gross_into_S(d_k) = d_k + fee_S(d_k)` where
 `fee_S(d) = fee_base_msat + floor(d * fee_proportional_millionths / 10^6)`.

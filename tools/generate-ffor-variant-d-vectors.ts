@@ -1557,7 +1557,8 @@ function emitScenario(r: IScenarioResult): void {
 	w(`| pre-round balance \`S\` / \`R\` | ${FUNDING_SAT * 1000n - sc.rPreMsat} / ${sc.rPreMsat} msat |`);
 	w(`| \`S\` balance after the round | ${FUNDING_SAT * 1000n - sc.rPreMsat - r.budget} msat |`);
 	w();
-	w('Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer\'s HTLC must deliver; they never appear on the channel):');
+	w('Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).');
+	w('A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:');
 	w();
 	w('| k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |');
 	w('|---|---|---|---|---|---|---|---|');

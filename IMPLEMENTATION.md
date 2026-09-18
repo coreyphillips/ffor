@@ -7,7 +7,9 @@ work still needed for another Lightning engine or a wallet release.
 ## Pinned baseline
 
 - Review date: **2026-09-17**.
-- Specification: draft **v0.9.3**, including section 17's errata and Appendix F paging.
+- Specification at this verification baseline: draft **v0.9.3**, including section
+  17's errata and Appendix F paging. The current draft is **v0.9.4**; its fee-policy
+  change is covered by the addendum below, not these historical execution results.
 - Reference: Beignet
   [`9ea018b6371c8b22366a133bc504679ac04b830e`](https://github.com/coreyphillips/beignet/tree/9ea018b6371c8b22366a133bc504679ac04b830e)
   on `master`.
@@ -31,7 +33,8 @@ merged in [Beignet #897](https://github.com/coreyphillips/beignet/pull/897). It 
 than the pinned verification baseline below and does not extend that baseline's
 recorded test results.
 
-Sections 7.6, 9.5.1 and 11.3 now describe Variant D's public-channel fee acceptance.
+Draft v0.9.4 sections 7.3, 7.6, 8, 9.5.1 and 11.3 describe Variant D's public-channel
+fee acceptance; section 17.8 records the compatibility change from v0.9.3.
 A qualifying plaintext payment can cover either the book fee or S's current public
 policy on the channel named by the onion. The lower complete fee is sufficient;
 R's voucher amount is unchanged. Private or otherwise unqualified hops and blinded
