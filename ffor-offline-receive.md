@@ -2,8 +2,9 @@
 
 **Non-custodial offline Lightning payments via delegated settlement and enforceable channel vouchers**
 
-- Status: Draft v0.9.4 (2026-09-18). This revision changes Variant D fee acceptance
-  without changing wire formats. The current Beignet baseline implements
+- Status: Draft v0.9.5 (2026-09-18). This revision specifies the payer-chosen
+  receive-request interface and tightens issuer retry binding without changing
+  wire formats (§9.7.9, §17.9). The current Beignet baseline implements
   Variant D, D-R receipt witnesses and the BOLT 12 issuer. See
   [IMPLEMENTATION.md](IMPLEMENTATION.md) for the pinned revision, source/test mapping,
   executed checks and outstanding qualification work.
@@ -11,6 +12,12 @@
   payment may cover either the book fee or the selected public channel's advertised
   fee. Private and blinded hops retain the book fee. This changes settlement
   behaviour relative to v0.9.3; §17.8 records the compatibility limits.
+- **v0.9.5 specifies amountless receive requests, not variable-value vouchers.**
+  A BOLT 12 offer can omit its amount; the payer then requests a positive amount
+  and the issuer selects an exact matching, unissued voucher. The resulting invoice
+  still names that fixed amount. A wallet may treat a blank or zero create-request
+  input as "payer chooses", but MUST NOT encode a zero invoice or omit the amount
+  of a Variant D BOLT 11 invoice. See §9.7.9 for the finite-inventory limitation.
 - Appendices A and D contain computed vectors for different constructions. M1-M7
   describe the historical A/B prototype on `feat/ffor`; M8/M9 cover the current D/D-R
   implementation. Appendix C's Variant B tower transport remains separately
@@ -923,8 +930,10 @@ for every failure, as BOLT 4 requires of a blinded hop, and MUST NOT leak which 
 failed.
 
 The voucher then pays `v_k = d_k`. `R` MUST NOT sign an invoice for `H_k` at any amount
-other than `d_k`. `T` (§9.4) MUST verify `voucher_amount_msat == d_k` against the
-amounts in its provisioning bundle, never against the `htlc_amount_msat` `S` reports,
+other than `d_k`, including an omitted amount or a literal zero. An amountless
+receive request selects the hash only after the payer chooses an amount (§9.7.9);
+it does not relax this equality. `T` (§9.4) MUST verify `voucher_amount_msat == d_k`
+against the amounts in its provisioning bundle, never against the `htlc_amount_msat` `S` reports,
 and `R` on return MUST verify the same. A package whose voucher amount differs from
 `d_k` by any amount, including one millisatoshi, MUST be refused as invalid.
 
@@ -1866,21 +1875,22 @@ On an `invoice_request` that arrives over one of the offer's paths and passes BO
 own checks, `I`:
 
 1. Computes the **requested amount**: `invreq_amount` if present, else BOLT 12's
-   *expected amount* from `offer_amount` and `invreq_quantity`.
-2. Selects a slot: an unissued `k` with `d_k` **equal** to the requested amount. If
-   `offer_amount` is present the offer SHOULD be sized so that `d_k = offer_amount ×
+   *expected amount* from `offer_amount` and `invreq_quantity`. It MUST be a positive
+   integer representable as `u64`. Checks any existing reservation under the rules
+   below before attempting new slot selection.
+2. For a new reservation, selects an unissued `k` with `d_k` **equal** to the
+   requested amount. If `offer_amount` is present the offer SHOULD be sized so that `d_k = offer_amount ×
    quantity` exists for the quantities `R` expects to sell; with `offer_amount` absent
    (payer-chosen amounts) the payer's `invreq_amount` must land exactly on a slot. `I`
    MUST NOT round, MUST NOT choose a larger slot, and MUST NOT accept `invreq_amount`
    above the expected amount unless it equals a slot (BOLT 12's "MAY reject if it
    greatly exceeds" is a MUST here). Fixed slots are the price of §7.6's equality.
 3. Marks the slot issued **durably, with a compare-and-swap on the slot state**,
-   recording `invreq_payer_id` and a hash of `invreq_metadata`, before any invoice
-   leaves. A crash between the mark and the send leaves the slot issued and the
-   invoice unsent; the payer retries, and BOLT 12's rule for identical
-   `invreq_metadata` lets `I` re-answer with the same invoice (same slot, same hash,
-   same payer). A request with different metadata gets a different slot, never the
-   same hash twice.
+   recording the offer id, `invreq_payer_id`, a hash of `invreq_metadata`, the
+   request digest defined below, and the invoice's initial absolute expiry, before
+   any invoice leaves. A crash between the mark and the send leaves the slot issued.
+   Retries follow the rules below; a new request gets a different slot or refusal,
+   never a previously issued hash.
 4. Builds the invoice: `invoice_payment_hash = H_k`; `invoice_amount = d_k`;
    `invoice_paths` = one fresh blinded payment path from the template, with
    `invoice_blindedpay` aggregated per BOLT 4 (§7.6); `invoice_relative_expiry` so that
@@ -1889,6 +1899,36 @@ own checks, `I`:
    the signature per BOLT 12 for a path-terminal issuer; optionally TLV
    `ffor_issuer_attestation` (§9.7.5).
 5. Sends it over the request's `reply_path`.
+
+**Request binding and retries.** The reservation key is
+`(offer_id, invreq_payer_id, SHA256(invreq_metadata))`. Its request digest is
+`SHA256(canonical invoice_request TLV bytes excluding signature TLV elements)`.
+Signature elements are types 240 through 1000 inclusive, as in BOLT 12. All allowed
+non-signature unknown TLVs are included, binding amount, quantity, chain and every
+copied offer field.
+The transport reply path is not part of that digest. `I` MUST check an existing
+reservation before allocating: a different digest under the same key receives the
+fixed refusal below, without returning an old invoice or consuming another slot.
+Both reservation-key uniqueness and slot ownership MUST be committed atomically
+across every offer and mailbox backed by the same activated book. Concurrent identical
+requests MUST NOT reserve two slots, and concurrent distinct requests MUST NOT own
+one slot. Registering the book under another name cannot reset its inventory.
+
+For an exact retry, `I` MAY refuse and MUST refuse if it has authoritative evidence
+that the slot is already settling or settled, such as its witness fulfil record.
+If it responds, the original slot, hash and amount MUST be reused, and the response
+MUST satisfy BOLT 12 for the current request
+and arrival path. These offers omit `offer_issuer_id` (§9.7.1): BOLT 12 therefore
+forbids replaying the previous invoice, even with identical metadata. `I` MUST build
+a fresh invoice, including a fresh blinded payment path and the appropriate
+path-terminal signature, with an absolute expiry no later than the initial
+invoice's absolute expiry and the current epoch/offer limits. A retry MUST NOT
+extend a reservation's lifetime, allocate another slot, or succeed after that
+expiry, `issue_until`, offer expiry or mailbox close. Exhaustion of *unissued*
+slots alone does not invalidate an eligible existing reservation. If the durable
+reservation is missing or ambiguous after a failure, `I` MUST refuse rather than
+guess or recycle a slot. This is retry idempotency, not protection from §13.7's
+same-hash reuse attack.
 
 Refusals use `invoice_error` with a fixed string that reveals nothing about the book:
 `"no slot for this amount"` when no unissued `d_k` equals the requested amount, and the
@@ -1926,32 +1966,38 @@ The issuer learns every request (payer id, amount, quantity, metadata), every sl
 issued, and, if it is also a witness, every settlement. It knows `R`'s node id and the
 channel. A payer learns the issuer's blinded node id for the path and nothing about
 `R` unless it asks for the attestation. `S` learns nothing new: it sees delegated HTLCs
-from the last witness as before. Two invoices for the same offer share nothing but the
-offer id, since paths and hashes are fresh per invoice. `R` running its own issuer is
-not possible while offline; that is the role's definition, and §12.5's bound applies:
+from the last witness as before. Distinct reservations for the same offer use fresh
+paths and hashes. Retry responses remain linkable by their reserved hash and request
+fields. `R` running its own issuer is not possible while offline; that is the role's
+definition, and §12.5's bound applies:
 serving invoices to unknown payers is an always-online, stateful job that no script
 removes.
 
 #### 9.7.7 Retirement
 
-Issuance stops at the first of: `issue_until` reached; the book exhausted;
+New slot issuance stops at the first of: `issue_until` reached; the book exhausted;
 `ff_witness_close` received for the mailbox; the offer's own expiry. An invoice issued
 before retirement stays payable until its own expiry, which §9.7.3 bounds by `D`, so
 no unconsumed invoice outlives its slot. `I` MUST persist the issued-slot state with the
 mailbox (§F.5) and MUST serve it to `R` on request (`ff_issuer_status`, Appendix F.6),
 so that `R` on return can tell an issued-but-unpaid slot from a never-issued one when
-it reads the `ff_close_ack` bitmap. A retired offer stays answerable: a request after
-retirement receives §9.7.3's fixed refusal, never an unknown-offer error, which would
-tell the payer that issuance ended.
+it reads the `ff_close_ack` bitmap. A retired offer stays answerable: a new request
+after retirement receives §9.7.3's fixed refusal, never an unknown-offer error, which
+would tell the payer that issuance ended. An exact retry of an existing reservation
+may still be answered when exhaustion alone caused retirement, subject to every
+expiry and close check in §9.7.3.
 
 #### 9.7.8 Conformance
 
 - A payer holding only the offer, with a stock BOLT 12 implementation and no FFOR
   knowledge, obtains an invoice for an unconsumed slot and pays it with a stock
   payment; `R` recovers `d_k`.
-- A second `invoice_request` for a consumed slot, with different metadata, receives a
-  different slot or the fixed refusal; with identical metadata it receives the same
-  invoice.
+- A second `invoice_request` for an issued reservation, with different metadata,
+  receives a different slot or the fixed refusal; with identical metadata it receives the same
+  reserved slot in a fresh BOLT 12 response, or refusal, under §9.7.3. A changed
+  request under the same reservation key is refused without consuming a slot.
+- Concurrent identical requests consume at most one slot; concurrent distinct
+  requests cannot consume the same slot, including through different offers.
 - The issuer crashing between marking a slot issued and sending the invoice does not
   issue the slot twice after restart.
 - Every issued invoice's paths traverse the required witnesses; a test payer that
@@ -1960,6 +2006,92 @@ tell the payer that issuance ended.
   issue_until" and "after close".
 - Vectors: a K = 1 book, a slot grid, an exhausted book, and a request with no matching
   amount.
+
+#### 9.7.9 Payer-chosen receive requests (amountless offer interface)
+
+This optional interface lets `R` create a receive request without entering a payment
+amount. It uses §9.7's existing issuer, not the weaker A/B amountless profile. The
+shareable object is a **BOLT 12 offer**, not a BOLT 11 invoice or a BOLT 12
+`invoice_request` (the latter is the payer's response to the offer). The final BOLT 12
+invoice always carries a positive fixed amount. No new wire type or feature bit is
+allocated.
+
+**Creation and representation.** A wallet supporting this interface:
+
+- MUST expose an explicit payer-chosen receive mode. It MAY accept omitted or zero
+  `amount_msat` as an alias for that mode at its *create-request* boundary only.
+  Negative, fractional, overflowing and otherwise malformed amounts MUST be rejected,
+  not coerced to zero. Exact integer unit conversion is required.
+- MUST return a discriminated offer result, with its encoded offer and offer id,
+  separately from a fixed invoice result. It MUST NOT invent a payment hash or
+  represent the offer as a zero-value payment. An existing API that promises a
+  BOLT 11 invoice MUST reject this mode unless its caller explicitly opts into an
+  offer-capable result contract.
+- MUST omit `offer_amount`, `offer_currency` and, for this single-payment interface,
+  `offer_quantity_max`. `offer_paths` terminate at the provisioned issuer and
+  `offer_issuer_id` is absent, as in §9.7.1. Setting `offer_amount = 0` is invalid.
+- MUST have a durably active, valid book, the required acknowledged witness and
+  issuer provisioning, and a positive, unissued eligible slot before advertising
+  the request as ready for offline receive. Lack of support or inventory MUST NOT
+  silently fall back to an ordinary invoice presented as offline-capable.
+- MUST obtain explicit authorization for the book's positive denominations, total
+  reserved liquidity, slot count and expiry, either during this flow or from an
+  existing user-approved policy. A zero request input does not authorize an
+  unlimited budget, reserve zero liquidity, or define a voucher denomination.
+  This interface uses independent hashes; hash-chain books are excluded because
+  their ordered levels impose a separate admission constraint (§9.5.4).
+
+The offer can be reused to request distinct invoices while inventory remains; each
+invoice hash retains its existing single-use rules. A wallet MUST track the offer
+separately from its issued invoices and paid slots. Creating the offer, allocating a
+slot or receiving an invoice response is not payment success or received balance.
+
+**Choosing and paying.** The payer supplies `invreq_amount = a`, an integer with
+`0 < a ≤ 2^64 − 1`. Missing or zero `invreq_amount` MUST be refused before reserving
+any slot. For a new reservation there must be an eligible unissued `k` with
+**`a == d_k`**, already checked against the setup-time dust, fee-overflow, HTLC and
+liquidity limits. A min/max range
+alone is insufficient: a value between two available denominations can still fail.
+`I` MUST NOT round, choose a larger voucher, split across slots, combine hashes,
+relabel a voucher, or deduct fees from `a`. It issues `invoice_amount = d_k = a`
+and `invoice_payment_hash = H_k`, preserving §9.7.3's durable reservation and retry
+rules. Each slot has one issuance authority; multiple independently allocating
+issuers MUST NOT share its inventory without an atomic common reservation store.
+
+The payer MUST validate the response under BOLT 12, including equality to the
+requested amount, and approve that positive amount and its fee limit before sending
+HTLCs. Settlement and recovery remain exactly §7.6, §9.5 and §9.6: the invoice amount,
+voucher credit and settled amount agree; forwarding fees are additional and the
+existing blinded-path rounding allowance is unchanged. This interface never accepts
+zero-value payments and does not enable MPP.
+
+For example, a book with unissued denominations `[1000000, 2000000, 2000000]` msat
+can answer three requests for 1000, 2000 and 2000 sats, in any order. A 1500-sat
+request fails even though it is inside that range; another distinct 2000-sat request
+fails after both matching slots have been issued. All such refusals retain §9.7.3's fixed
+response, without disclosing the remaining book. A wallet SHOULD explain finite
+denominations and inventory when the receiver configures the request; it MUST NOT
+promise arbitrary amounts or unlimited reuse. No public inventory enumeration is
+added.
+
+**Why this preserves the amount guarantee.** For a committed slot, possession of
+`t_k` unlocks `d_k` regardless of the upstream payment amount `a`. Accepting `a < d_k`
+would overcredit `R`; accepting `a > d_k` would leave part of the intended receiver
+credit unenforceable. Selecting a matching hash *after* choosing `a` preserves the
+equality. Merely removing the amount from a fixed-slot BOLT 11 invoice, adding
+signed min/max limits, or changing the displayed amount cannot do that. Arbitrary
+amountless BOLT 11 receive needs a different construction and is outside this
+interface. Existing bounded-return, recovery-availability and same-hash reuse limits
+remain (§12.5, §13.7); amountless offers do not strengthen them.
+
+The arithmetic and admission vectors in
+[`tools/amountless-request-vectors.test.mjs`](tools/amountless-request-vectors.test.mjs)
+are an executable model of these rules, not a wallet implementation or wire-level
+interoperability test. Implementations additionally MUST exercise real concurrent
+allocation, crash/restart, multi-offer inventory sharing, changed-request retries,
+expired retries, invalid response amounts, both claim paths and a payer supporting
+BOLT 12 while `R` stays offline. See [AMOUNTLESS-RECEIVE.md](AMOUNTLESS-RECEIVE.md)
+for implementation scope and release gates.
 
 ---
 
@@ -2774,6 +2906,9 @@ establish a live regtest or stock-payer interoperability result.
   trampoline-hold deployments: [eclair #2424](https://github.com/ACINQ/eclair/issues/2424),
   [Breez Lightning Rod](https://medium.com/breez-technology/introducing-lightning-rod-2e0a40d3e44a)
 - bLIP-51 liquidity ads (budget provisioning); BOLTs 2/3/5 (all reused machinery)
+- [BOLT 11 amount encoding](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md#human-readable-part)
+  and [BOLT 12 offers and invoice requests](https://github.com/lightning/bolts/blob/master/12-offer-encoding.md#requirements-for-invoice-requests),
+  including signature TLV elements and the `offer_issuer_id` restriction on invoice replay
 - Fair-exchange impossibility (the bound §12.5 rests on): Henning Pagnia and Felix
   Gärtner, *On the Impossibility of Fair Exchange without a Trusted Third Party*,
   Darmstadt University of Technology TUD-BS-1999-02, 1999; Shimon Even, Oded Goldreich and
@@ -2949,6 +3084,24 @@ successful epoch setup does not establish support. Confirm the
 settlement peer's support or ensure the payment covers the book fee. Matching fees
 only at setup does not protect against later policy changes or a different public
 channel being selected.
+
+### 17.9 v0.9.4 → v0.9.5: payer-chosen receive interface and retry binding
+
+Section 9.7.9 makes the existing amountless-offer/exact-slot issuer flow explicit at
+the wallet boundary. Zero is optionally a create-request alias; wire amounts and
+voucher values remain positive. The interface excludes chained books and never
+relaxes §7.6's amount equality. Existing fixed invoices, signed book fields,
+commitments, witness records and message encodings are unchanged.
+
+Section 9.7.3 tightens reservation binding to the full non-signature request and
+requires atomic inventory across offers. It also corrects the previous instruction
+to replay the same invoice: BOLT 12's replay permission requires `offer_issuer_id`,
+which these path-terminal offers omit. Eligible exact retries may receive a fresh
+response for the same reservation without extending expiry, or refusal. Older
+issuers may not enforce these rules. Successful epoch activation is not evidence
+of support; applications MUST establish issuer support before enabling this
+interface, and MUST NOT infer it from the unchanged wire messages. These are new
+conformance requirements, not a claim that the pinned implementation passes them.
 
 ## Appendix B: escape commitments and the aggregate voucher (normative)
 

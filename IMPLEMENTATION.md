@@ -8,8 +8,9 @@ work still needed for another Lightning engine or a wallet release.
 
 - Review date: **2026-09-17**.
 - Specification at this verification baseline: draft **v0.9.3**, including section
-  17's errata and Appendix F paging. The current draft is **v0.9.4**; its fee-policy
-  change is covered by the addendum below, not these historical execution results.
+  17's errata and Appendix F paging. The current draft is **v0.9.5**; its changes and
+  v0.9.4's fee-policy change are covered by the addenda below, not these historical
+  execution results.
 - Reference: Beignet
   [`9ea018b6371c8b22366a133bc504679ac04b830e`](https://github.com/coreyphillips/beignet/tree/9ea018b6371c8b22366a133bc504679ac04b830e)
   on `master`.
@@ -55,6 +56,35 @@ restarts S while R stays offline and pays before gossip resynchronizes. The exis
 fee-failure path also does not attach the named public channel's update, so the payer
 does not learn a revised policy from that failure. Neither behavior is established
 as fixed by this documentation change.
+
+## Payer-chosen requests, 2026-09-18
+
+Draft v0.9.5 §9.7.9 specifies an optional wallet interface over the existing BOLT 12
+issuer: omit the offer amount, then issue a positive fixed invoice for an exact
+matching slot. The existing reference has the underlying optional offer amount and
+exact-slot selection. The automatic receive flows and downstream apps still need
+integration; [AMOUNTLESS-RECEIVE.md](AMOUNTLESS-RECEIVE.md) records inspected revisions,
+source paths, estimates and release gates.
+
+Section 9.7.3 additionally requires full-request reservation binding, atomic request
+and slot uniqueness across offers, and corrected BOLT 12 retry responses without
+expiry extension. The inspected issuer's payer/metadata-only lookup and cached
+invoice replay do not establish conformance to those requirements. Applications
+must confirm upgraded issuer support; the unchanged wire format cannot signal it.
+
+The new executable specification vectors run without Beignet dependencies:
+
+```sh
+node --test tools/amountless-request-vectors.test.mjs
+```
+
+Executed with Node.js **22.13.1**: **24 passing, 0 failing, 0 skipped**. These check
+integer amount admission, exact denomination selection, shared inventory and the
+sequential reservation/retry model. They do not execute BOLT 12 encoding/signatures,
+real concurrent storage, crash recovery, Lightning settlement or on-chain claims.
+The tests assume a valid activated book; the existing setup-time dust, fee, HTLC
+and liquidity checks are still mandatory. Existing cryptographic appendix vectors
+are unchanged and were not regenerated for this interface-only change.
 
 ## Current implementation map
 
