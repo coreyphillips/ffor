@@ -187,7 +187,8 @@ this channel, so its next offered id is 0.
 | pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6999000000 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
@@ -605,7 +606,8 @@ resolved, so voucher `k` gets id `6 + k`.
 | pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6948710750 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
@@ -1072,7 +1074,8 @@ outputs, fee-spike buffer at twice the rate, anchors) are checked against
 | pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6948710750 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
@@ -1538,7 +1541,8 @@ book carrying it is refused at step 2 and never built (see D.4.9).
 | pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6999454000 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
@@ -1959,7 +1963,8 @@ voucher 1 and voucher 483 land at output indices unrelated to `k`.
 | pre-round balance `S` / `R` | 7000000000 / 3000000000 msat |
 | `S` balance after the round | 6736282000 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
@@ -2401,7 +2406,8 @@ needs only the HTLC output and `t_1`, never a main output.
 | pre-round balance `S` / `R` | 10000000000 / 0 msat |
 | `S` balance after the round | 9999000000 msat |
 
-Vouchers (`fee_S` and `gross_into_S` per 7.6 are what the payer's HTLC must deliver; they never appear on the channel):
+Vouchers (`fee_S` and `gross_into_S` show the book-priced fee and amount into S; they never appear on the channel).
+A qualifying public plaintext payment may instead satisfy `fee_required_S` from 7.6; these setup vectors do not exercise that exception:
 
 | k | d_k (msat) | output (sat) | fee_S(d_k) | gross_into_S(d_k) | s_htlc_id_k | preimage t_k (S only) | H_k |
 |---|---|---|---|---|---|---|---|
