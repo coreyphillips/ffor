@@ -31,6 +31,8 @@ receipt witnesses or issuer must implement their respective roles.
 |---|---|
 | [`ffor-offline-receive.md`](ffor-offline-receive.md) | Draft v0.9.4: lifecycle, variants, amount/fee rules, wire messages, enforcement, recovery and security limits |
 | [`IMPLEMENTATION.md`](IMPLEMENTATION.md) | Pinned reference revision, implementation/test matrix, verification scope and porting checklist |
+| [`CONCURRENT-RECEIVE.md`](CONCURRENT-RECEIVE.md) | Proposed concurrent Variant D extension: ordinary online payments while unpaid offline invoices stay valid on one channel; unimplemented |
+| [`CONCURRENT-IMPLEMENTATION.md`](CONCURRENT-IMPLEMENTATION.md) | Downstream changes and release gates for concurrent receive |
 | [`ffor-variant-d-vectors.md`](ffor-variant-d-vectors.md) | Appendix D: Variant D setup transcript, both commitment views, activation hashes and claim paths |
 | [`ffor-test-vectors.md`](ffor-test-vectors.md) | Appendix A: older fast-forward `C_i^R` commitments and amount/fee arithmetic; not a substitute for Appendix D |
 | [`tools/`](tools/) | Vector generators using a sibling Beignet checkout; regeneration instructions in `IMPLEMENTATION.md` |
@@ -98,6 +100,13 @@ Beignet and the existing normative rules. It does not allocate new wire identifi
 or change the protocol version. Feature bits and message numbers remain provisional
 pending bLIP assignment. Existing implementation and tests are not a substitute for
 independent review or cross-implementation qualification.
+
+The [concurrent Variant D proposal](CONCURRENT-RECEIVE.md) addresses
+[issue #39](https://github.com/coreyphillips/ffor/issues/39). It specifies separately
+negotiated traffic rules, persistent vouchers across ordinary commitment updates,
+nonterminal settlement synchronization and incremental redemption. The base draft
+and current engine retain their existing channel freeze. The proposal includes
+standalone models; it does not implement or qualify the new behavior in a wallet.
 
 ## Prior art
 

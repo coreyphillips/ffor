@@ -1963,6 +1963,25 @@ tell the payer that issuance ended.
 
 ---
 
+### 9.8 Concurrent channel use (proposed extension)
+
+[CONCURRENT-RECEIVE.md](CONCURRENT-RECEIVE.md) specifies an experimental extension
+to Variant D for [issue #39](https://github.com/coreyphillips/ffor/issues/39): keep
+unpaid voucher HTLCs enforceable while ordinary online sends and receives use the
+remaining capacity on the same channel. It defines explicit capability and signed
+version negotiation, active/draining traffic rules, immutable activation identity,
+current commitment recovery, nonterminal settlement snapshots and paid-voucher
+redemption without retiring other invoices.
+
+The extension is **not implemented or enabled by this base draft**. Existing
+sections 7.5 and 9.5 retain their frozen behavior unless both peers explicitly
+select the extension described in the companion document. Its proposed identifiers
+are experimental; existing message bytes and Appendix D vectors are unchanged.
+Variants A/B cannot use its traffic relaxation. Release requirements and downstream
+source mappings are in [CONCURRENT-IMPLEMENTATION.md](CONCURRENT-IMPLEMENTATION.md).
+
+---
+
 ## 10. Escape: `S`'s unilateral exit (optional, `G > 0`)
 
 Escapes are a **Variant A/B mechanism**. Variant D (§9.5) needs none: its vouchers carry
