@@ -4,6 +4,11 @@ This document maps the FFOR draft to the current reference implementation. It
 separates source/test coverage, checks executed for this snapshot, and qualification
 work still needed for another Lightning engine or a wallet release.
 
+The separately negotiated [concurrent receive extension](CONCURRENT-RECEIVE.md)
+is proposed and unimplemented. Its [downstream implementation plan](CONCURRENT-IMPLEMENTATION.md)
+has separate gates. None of the historical results below validates ordinary
+payments during an active concurrent epoch.
+
 ## Pinned baseline
 
 - Review date: **2026-09-17**.
