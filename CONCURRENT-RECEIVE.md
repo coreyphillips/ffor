@@ -62,6 +62,12 @@ encodings or a length other than two are malformed. TLV 17 is absent in both
 messages for a baseline epoch. An older peer ignoring the odd TLV cannot enable
 concurrent operation, because its acceptance lacks the required echo.
 
+A TLV 17 length other than two is a decode error, not an unsupported version. A
+well-formed unsupported value is refused with `ff_abort` reason 2 (`terms
+refused`). A missing or different requested echo is likewise refused with reason
+2; an unsolicited echo is a protocol error, reason 7. These outcomes do not
+select a concurrent version or authorize a baseline retry under that epoch.
+
 The new fields are already covered by `T_init` and `T_setup`, and therefore by
 `H_act` and both activation signatures. The selected version MUST be persisted
 with that transcript. It MUST NOT be inferred from current advertised features,
@@ -85,7 +91,8 @@ This file overrides only these rules, and only for a selected version 1 epoch:
 | Section 9.5.1 return path and 9.6.6 | Reconnect and receipt fetch do not close the book |
 | Sections 7.5.6 and 9.5.1 voucher removal | A verified preimage permits fulfillment during `ACTIVE`; failure still requires the terminal close authority |
 | Section 9.5.1 HTLC counters | Ordinary offered ids continue past the voucher range and MUST NOT reset after book closure |
-| Section 7.5.4 final bitmap | Includes all upstream-settled slots, including vouchers already redeemed |
+| Section 7.5.4 final bitmap | Includes all upstream-settled and durably recorded redeemed slots, including redemptions without an upstream settlement record |
+| Section 11.1 pre-activation `ff_error` | An authenticated `ff_sync` unavailable before activation receives the nonterminal error in section 5.2; it does not require `ff_abort` |
 | Section 14 | Adds the experimental identifiers in section 1.1 |
 
 All other base requirements remain, including activation acknowledgement loss,
@@ -132,6 +139,14 @@ block updates needed to finish already admitted operations. BOLT quiescence stil
 forbids updates while actually quiescent. No invoice is exposed before the base
 activation and witness acknowledgements are durable.
 
+Each peer establishes its local barrier before sending or processing the first
+setup message. Until activation or abort, it also refuses locally originated fee
+updates, splices, cooperative shutdown and unrelated quiescence. The `stfu`
+exchange required by activation remains permitted after the voucher rounds
+finish. The barrier does not cancel admitted updates or their ordinary BOLT
+retransmission and commitment obligations. An abort burns the epoch id; late
+adds do not revive the epoch or authorize invoice exposure.
+
 After activation terminates quiescence:
 
 | Epoch state | Permitted channel behavior |
@@ -143,8 +158,20 @@ After activation terminates quiescence:
 
 For `ACTIVE` and `DRAINING`, `update_fee`, new `stfu`, splice and cooperative channel
 close negotiation remain disallowed in version 1. Forced on-chain enforcement and
-normal HTLC safety deadlines remain available. The old blockheight guard MUST NOT
-suppress expiry handling for ordinary HTLCs.
+normal HTLC safety deadlines remain available. bLIP-51 `update_blockheight`
+remains disallowed in these states. Ordinary HTLC expiry handling continues
+independently: the guard on that message MUST NOT suppress ordinary fulfillment,
+failure or on-chain deadline enforcement.
+
+Only the epoch's validated redemption, final drain or aborted-setup unwind may
+originate a voucher removal. In `ACTIVE`, `R` MUST NOT originate a voucher
+failure, and `S` MUST treat a received voucher failure as a protocol error. `S`
+MUST NOT sign a successor that removes the voucher on the authority of that
+failure. In `DRAINING`, `S` MAY accept a received voucher failure under ordinary
+BOLT removal rules, including for a set final-bitmap bit. It retains that bit,
+its settlement and consumed-slot records, and the discrepancy evidence. Such
+acceptance does not authorize reuse or imply that a signed failure can later be
+reversed.
 
 The peer MUST apply ordinary directional admission checks before accepting new
 work. A full receive direction is not, by itself, reason to disable affordable
@@ -165,6 +192,10 @@ For each relevant current or proposed commitment and pending-update view:
   value limits. Ordinary `R -> S` HTLCs use `S`'s separate limits.
 - Charge the voucher value once. If it is already excluded from available balance
   as an offered HTLC, do not subtract the book budget a second time.
+- At the activation recheck, use the setup's pre-voucher-round balances, or
+  reconstruct the equivalent balances from the committed voucher entries, when
+  checking the book's original funding requirements. Separately check the actual
+  current commitment. The recheck MUST NOT deduct the voucher budget twice.
 - Preserve both peers' applicable reserves, nontrimming voucher outputs, total
   commitment weight, anchors and the funder's mandatory base section 7.6 fee-spike
   buffer for the full mixed commitment, not just the initial `K` vouchers.
@@ -197,6 +228,14 @@ the successor and all material required to enforce it under the ordinary BOLT
 state machine. Also persist outgoing signatures and associated updates before
 release so restart can replay them exactly. Retain all claim material required
 for valid intermediate and revoked on-chain states, including second-stage paths.
+
+Once a commitment signature is durably queued for release or released, the
+signed transaction and its associated commitment number are immutable.
+Retransmission MUST use the exact persisted signature and transaction. A changed
+update set MUST NOT produce an alternative transaction or replacement signature
+for that same commitment number. Revocation and replay bookkeeping MUST refer to
+the commitment actually signed, including when a voucher removal is still
+pending in the other view.
 
 Activation-time signatures and output indexes MUST NOT be reused for a successor.
 Enforcement uses the valid current local state or correctly classified observed
@@ -267,13 +306,24 @@ reportable snapshot. In `DRAINING` or `CLOSED`, replay the persisted
 `ff_close_ack` instead. If the close is still completing, finish or recover its
 base admission barrier before replying. Do not synthesize a new terminal bitmap.
 
-A slot is reportable only after the upstream HTLC is irrevocably committed and
-fulfilled as required by base section 9.5.2, and that result and its replay
-dependencies are durably recorded. A bare `SETTLING` intent is insufficient.
-After an uncertain crash window, recover the upstream fulfillment before adding
-that slot to a live snapshot. Until then it is omitted, without authorizing any
-voucher failure. A live fetch MUST NOT release an unused preimage, speculate that
-an upstream payment will complete, or convert a recoverable intent back to unused.
+The pre-activation `ff_error` reports that live synchronization is unavailable;
+it MUST NOT by itself abort or advance setup, burn the epoch id, or release a
+voucher preimage. The ordinary setup timeout and abort rules remain applicable.
+
+A slot is reportable after the upstream HTLC is irrevocably committed and its
+`update_fulfill_htlc` is durably queued as required by base section 9.5.2, with
+the result and all replay dependencies durably recorded. A slot is also
+reportable once `R` has presented a hash-valid `t_k` for its committed voucher,
+even if `S` has no corresponding upstream settlement record. `S` durably records
+that redemption as consumed before releasing dependent channel progress. This
+flag is monotonic across disconnect and replay. A bare `SETTLING` intent is
+insufficient. For the upstream reporting path, after an uncertain crash window
+recover the upstream fulfillment before adding that slot to a live snapshot.
+Until then it is omitted unless independently reportable by a recorded
+redemption, without authorizing any voucher failure. An unused slot has neither
+an upstream settlement nor a recorded redemption. A live fetch MUST NOT release
+an unused preimage, speculate that an upstream payment will complete, or convert
+a recoverable intent back to unused.
 
 Initialize sequence zero with the empty snapshot at activation. Before publishing
 a changed reportable set, atomically persist its bitmap, indexed preimages and
@@ -281,6 +331,13 @@ a changed reportable set, atomically persist its bitmap, indexed preimages and
 fetches without a set change retain the sequence. Reject sequence overflow rather
 than wrap. Snapshot generation is serialized with upstream settlement and close;
 it must never combine the bitmap from one state with preimages from another.
+
+Persistence before publication must satisfy the sender's strongest authoritative
+restore barrier, including its required replica or guardian acknowledgements.
+A restore MUST NOT let the sender publish different canonical content under an
+already published sequence. If an older restore source lacks that publication
+state, hold publication until it is recovered; a local disk write alone does not
+satisfy a quorum or guardian durability requirement.
 
 Sequence identifies canonical snapshot content, not message bytes: its content
 is `K || settled || num_preimages || preimages`. Nonce, signature and extension
@@ -304,6 +361,11 @@ Lower sequences MUST NOT roll back state. A conflicting signed snapshot is a
 protocol error: retain the evidence and valid claims, and use safe channel recovery
 if the peer cannot continue consistently. Never fail a voucher as a response.
 
+A valid response matching the outstanding nonce completes that fetch even if its
+sequence is lower, or equal with identical canonical content. It does not roll
+back or advance the accepted snapshot in those cases. Completion and snapshot
+progress are separate durable facts.
+
 Verify and preserve independently obtained witness/payer preimages even if the
 peer's snapshot omits them. A lower or uncorrelated response may still supply a
 hash-valid claim preimage, but cannot change snapshot progress or lifecycle.
@@ -319,7 +381,9 @@ the receiver does not retry it indefinitely after admission has closed.
 
 ## 6. Redeeming paid vouchers while the book stays active
 
-With a verified `t_k`, `R` MAY fulfill the original voucher while `ACTIVE`, through
+With a verified `t_k`, `R` MAY fulfill an outstanding original voucher while
+`ACTIVE`, subject to its actual signed views and pending removal records,
+through
 ordinary `update_fulfill_htlc` and commitment/revocation exchanges. The token may
 come from a valid live snapshot, a D-R witness or a payer. `S` MUST accept a valid
 fulfillment of that outstanding voucher irrespective of snapshot lag or its own
@@ -337,11 +401,22 @@ it MUST NOT fall back to ordinary forwarding, become a new offered HTLC or retur
 issuer inventory. The invoice's hash, amount, path and expiry remain unchanged for
 every still-outstanding slot.
 
+`R` MUST likewise reject an ordinary incoming HTLC whose hash belongs to its own
+current or retained delegated voucher book before forwarding or final-hop
+settlement. A voucher preimage MUST NOT automatically fulfill such an ordinary
+HTLC. This check is separate from recognizing the original voucher by its exact
+id, direction and tuple.
+
 Store consumed-slot records across restarts and epoch closure; do not reuse a
 voucher hash or its offered id in a future book. Channel HTLC counters advance
 normally in both directions. Honest rejection does not cryptographically prevent
 a malicious holder from reusing a known preimage to settle another payer's HTLC;
 base section 13.7 remains applicable.
+
+For each channel, retain the highest offered voucher id from earlier books.
+`R` MUST reject a new book whose `s_htlc_id_base` is not strictly greater than
+that high-water mark. This is a book admission check, not permission to reset or
+skip the ordinary directional HTLC counters.
 
 ## 7. Explicit retirement and draining
 
@@ -356,12 +431,33 @@ preimages include already redeemed slots. A removed voucher does not clear its
 settlement bit. All previously reported settled bits MUST remain set, and
 `SETTLING` treatment remains as required by base section 7.5.4.
 
+The final bitmap also includes every slot durably recorded as redeemed under
+section 5.2, including a redemption without an upstream settlement record.
+
 On receiving the final ack, `R` unions every valid preimage from every source.
 Already fulfilled slots are checked against their terminal records, not fulfilled
 again. Present vouchers with known preimages are fulfilled even if the peer denies
-payment. Present vouchers may be failed only if the final ack marks them unsettled
+payment, when fulfillment remains authorized by the actual signed commitment
+views and pending removal records. A voucher with an already signed failure
+follows the recovery rule below instead. Present vouchers may be failed only if
+the final ack marks them unsettled
 and `R` holds no preimage, under the base section 7.5.6 trust limits. A live snapshot,
 a receipt-query failure or a zero bit before this barrier never authorizes failure.
+
+If a final ack is otherwise well-formed and authenticated, has the correct
+channel, epoch and activation transcript binding, but clears a previously
+accepted live-snapshot bit, `R` processes it as terminal close authority while
+preserving the contradiction evidence. `R` retains the earlier signed snapshot
+and the contradictory final ack, and retains the preimage. It fulfills any
+present voucher for that slot when the actual signed commitment views and
+pending removal records still authorize fulfillment; otherwise it preserves the
+signed state for recovery. The contradiction does not authorize a new failure,
+reopen admission or discard a previously final removal record.
+
+This processing rule does not make the cleared bit conformant: `S` still
+violates the cumulative-bitmap requirement, and `R` retains both signed
+statements as evidence of that violation. No cleared bit overrides a known
+preimage or a final removal record.
 
 If a preimage arrives during a pending failure, preserve it and use ordinary
 commitment/on-chain recovery where still possible. A failure already irrevocable
@@ -369,12 +465,25 @@ cannot be undone by a later receipt. Signed peer statements and missing receipt
 availability retain the baseline bounded-withholding limitation; this extension
 does not strengthen a negative bitmap into proof of nonpayment.
 
+In particular, a newly learned preimage MUST NOT cause an implementation to
+rewrite a transaction already signed for a voucher failure, replace its
+signature at the same commitment number, or discard its replay obligations.
+Retaining the preimage alone does not restore an output or receiver credit to a
+commitment that already omits the voucher. Recovery must use the actual signed
+commitment views and their authorized successors.
+
 Normal in-flight HTLCs must continue resolving during `DRAINING`. After the bounded
 close transition, permit new unrelated ordinary payments within remaining capacity
 even if a voucher is still pending. `CLOSED` means every voucher, not every ordinary
 HTLC, has been irrevocably resolved. The peer must not force-close solely because
 an unrelated ordinary HTLC exists when the last voucher is removed; normal HTLC
 and channel safety policies still apply.
+
+After durably processing the final ack, a book with no remaining vouchers and
+complete final removal records transitions from `DRAINING` to `CLOSED`
+immediately. It does not wait for an unrelated commitment round. Absence from
+the live HTLC map alone is insufficient: a voucher may remain in a still-valid
+signed commitment.
 
 `ff_close_ack` replay, activation-acknowledgement loss, and explicit on-chain remedies
 remain unchanged. If `S` is unavailable, a local decision to cancel cannot make it
@@ -389,6 +498,11 @@ with persisted setup bytes and validate the live voucher subset and terminal
 resolution records against the recovered channel. Do not recompute historical
 `H_commit` from current txids or apply A/B counter exceptions.
 
+In the activation-acknowledgement-loss window, `S` retransmits the persisted
+`ff_activate_ack` before releasing channel updates that `R` would otherwise
+receive while still `ACTIVATING`. `R` verifies and persists that acknowledgement
+before processing those updates under the `ACTIVE` traffic policy.
+
 Before resuming new ordinary adds or new delegated admissions after reconnect,
 both peers MUST also confirm that the current `init` exchange advertises the base
 and concurrent capabilities. An observed incompatible reconnect holds new admission
@@ -399,11 +513,36 @@ negotiated offline settlement service continues while `R` is absent. Operators
 stopping new epoch creation can reject `ff_init` while retaining the capability
 advertisement needed to honor live epochs.
 
+This capability hold gates only the observing peer's own new ordinary adds, new
+delegated settlement and new voucher-invoice creation. It does not reject a
+peer-originated ordinary add solely because of the hold, block ordinary
+commitment progress, suppress fulfill/fail, or suppress exact retransmission.
+`ff_sync` remains available under the persisted mode. The hold is based on
+authenticated `init` observations and lasts until a compatible `init` exchange;
+disconnecting the incompatible connection does not clear it. Restart MUST NOT
+clear an observed hold by inferring compatibility from the epoch's stored
+selected version.
+
+When `R` has queued a voucher failure but the peer has not acknowledged the
+matching terminal close, hold that failure and any already signed or queued
+commitment chain that depends on it until close state is reconciled. Unrelated
+replay and voucher fulfillment need no such close hold when they do not depend
+on that chain. Do not modify an already signed chain to split it. This close
+hold is distinct from the capability hold and from ordinary BOLT reestablishment
+safety checks.
+
 Ordinary traffic can resume once those checks pass. Settlement fetching is separate
 and may run while other channel operations proceed. A missing FFOR record, a
 different activation or unavailable current recovery material is a data-loss or
 protocol-error case, not permission to drop the reservation or sign an old state.
 Refusing an unsupported persisted mode must not erase ordinary HTLC obligations.
+
+If `S` reports `DRAINING` or `CLOSED` but a restored `R` has lost the durable
+matching `ff_close` operation, an unsolicited replayed `ff_close_ack` is not
+proof that `R` has recovered that operation. Treat the missing close record as
+data loss and recover the missing correlation and replay dependencies through
+the normal recovery process. Do not synthesize a close record or fail vouchers
+merely to make the epoch states agree.
 
 D-R witnesses remain receipt stores. `R` MAY fetch their records repeatedly and
 validate them under the unchanged `H_act`. It MUST NOT send `ff_witness_close` on

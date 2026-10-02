@@ -71,6 +71,10 @@ Implementations may split work into smaller changes while retaining these gates.
   retirement, reconnect and enforcement, including crossing actions and crashes.
 - Specify which durable fact authorizes each signature, revocation and upstream
   preimage release. Model restart from each previous durable state.
+- Resolve refused-accept transcript binding and late voucher additions, the
+  mixed-commitment fee-buffer rule during failback, consumed-record retention,
+  and admission and enforcement policy for a disputed signed removal before
+  claiming those behaviors are qualified.
 - Produce positive and negative vectors for the new binding and transcript rules.
 
 Gate: model properties and vectors cover the contract's safety invariants; review
@@ -84,6 +88,10 @@ all counterexamples and unresolved assumptions. A simulation is not a security p
   a restored existing-profile epoch as concurrent.
 - Integrate voucher reservations with both commitment builders, admission limits,
   signing, revocation bookkeeping, retransmission and recovery persistence.
+- Persist the transaction, commitment number, signatures and exact replay
+  dependencies as one immutable signed commitment. Never replace a released or
+  durably queued signature with one for a different transaction at the same
+  number.
 - Validate live vouchers as a subset of outputs, including their amounts, hashes,
   expiries, spend paths and enforceability. Validate unrelated outputs normally.
 - Ensure fee policy and changing HTLC counts cannot trim or underfund a voucher;
@@ -105,6 +113,12 @@ unpaid voucher. Every rejected operation leaves the existing invoice enforceable
   and unrelated operations. A wall-clock timeout alone must not authorize removal.
 - Preserve witness and issuer activation bindings across live sync and partial
   redemption. Do not close either service merely because the wallet reconnects.
+- Complete a matching live fetch independently from snapshot progress, include
+  recorded redemptions without upstream records in cumulative reports, and
+  retain contradictory signed snapshots and final close evidence without losing
+  preimages.
+- Check final removal records in both signed views before closing a book with no
+  live voucher entries; unrelated ordinary traffic must not postpone `CLOSED`.
 
 Gate: crossing settlement and retirement, duplicate evidence, missing evidence and
 partial reconnect cannot produce double credit, lost claim rights or unsafe reuse.
@@ -117,6 +131,12 @@ partial reconnect cannot produce double credit, lost claim rights or unsafe reus
   separately from normal voucher recovery.
 - Carry protection state through channel monitor persistence, recovery snapshots,
   watchtower data and restart. Preserve existing stale-state safety holds.
+- Apply the authoritative restore barrier before publishing a snapshot sequence.
+  A restore missing publication state must recover it before publishing again.
+- Treat a learned preimage after a signed voucher failure using the actual
+  signed commitment views. Preimage retention alone does not undo that failure
+  or restore a removed output. Automatic force-close in this dispute requires a
+  separate approved policy; do not infer it from the receipt-import path.
 - Test fee bumps, timeout paths, reorgs and delayed evidence on real regtest spends.
 
 Gate: every applicable broadcast window in the matrix below has executed on-chain
@@ -133,6 +153,14 @@ insufficient to enable wallet use.
   capacity refusal without presenting the entire wallet as unusable.
 - Keep pending offline receipts separate from spendable balance until the engine
   reports the relevant final state. Deduplicate recovery and Activity by identity.
+- Bound the coordinator's setup wait starting with its own `ff_init`; do not
+  assume a receiver-side engine timer will abort an abandoned setup. On timeout
+  before `ACTIVATING`, request the engine's normal signed setup abort and retain
+  the channel reservation until any real voucher additions are safely unwound.
+  In `ACTIVATING`, preserve the acknowledgement-loss window and reconcile the
+  peer's state before deciding whether activation completed. Do not release the
+  reservation or start a replacement epoch solely because the application wait
+  expired.
 - Update pinned dependencies together and record the artifacts actually bundled in
   each app. Qualify background, foreground, force-stop and cold-launch paths.
 
@@ -173,6 +201,9 @@ channel types and fee policies; use real peer transport for reconnect and replay
 | Chain stress | Fee spikes and bumps, delayed confirmation, timeout race, reorg before/after claim confirmation, applicable pinning cases | Recoverable claim state persists; required margins and assumptions documented; balances and spent outputs verified |
 | Recovery sources | Settlement peer absent, witness absent, delayed/unbarriered record where supported, restored snapshot with unproven recency | Existing recency holds preserved; no fabricated receipt, credit or indefinite recovery guarantee |
 | Compatibility | Concurrent/current, concurrent/legacy, unsupported profile, attempted downgrade, restore across software upgrade, missing either feature on reconnect and subsequent restoration | Deterministic negotiated behavior; incompatible reconnect holds new admission without discarding existing obligations; live epochs keep their original semantics; existing-profile vectors unchanged |
+| Setup and refusal | Barrier from the first setup message; unsupported value versus malformed TLV length; authenticated refused accept; late voucher adds; coordinator timeout; abort crossing activation quiescence | No invoice exposure or epoch revival after refusal; agreed transcript binding and safe unwind; no reservation release before real voucher obligations finish; acknowledgement-loss window retained |
+| Signed removal and replay | Preimage import before and after a voucher-failure signature is durably queued; asymmetric commitment views; close-state mismatch; missing local close record | Exact signed transactions and replay dependencies retained; no alternative signature at the same commitment number; no claim that preimage retention reverses a signed failure; data-loss recovery preserves obligations |
+| Live snapshot and empty drain | Reportable redemption without an upstream record; authoritative restore barrier; matching equal/lower sequence; final ack clearing a reported bit; retirement after all vouchers were redeemed | Durable cumulative reporting; fetch completion without rollback; contradictory evidence and preimages retained; `CLOSED` after final ack and complete voucher records without requiring an ordinary round |
 | Native lifecycle | iOS and Android background/suspension, force-stop, lost network, cold start, repeated cold start, receiver absent at payment | Correct durable recovery without relying on background execution; no duplicate Activity or unsafe spendable balance |
 
 Use independent clocks for invoice wall time and chain height. Exercise deadline
